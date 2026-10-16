@@ -1,0 +1,16 @@
+fastapi>=0.120,<1.0
+uvicorn[standard]>=0.38,<1.0
+SQLAlchemy>=2.0.44,<3.0
+alembic>=1.17,<2.0
+psycopg[binary]>=3.2,<4.0
+pydantic-settings>=2.11,<3.0
+PyJWT>=2.10,<3.0
+pwdlib[argon2]>=0.2.1,<1.0
+python-multipart>=0.0.20,<1.0
+openpyxl>=3.1.5,<4.0
+reportlab>=4.4,<5.0
+email-validator>=2.3,<3.0
+
+# Test dependencies
+pytest>=8.4,<9.0
+httpx>=0.28,<1.0
