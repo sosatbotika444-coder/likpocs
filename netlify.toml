@@ -5,6 +5,7 @@
 
 [build.environment]
   NODE_VERSION = "24"
+  RAILWAY_API_URL = "https://likpocs-production.up.railway.app"
 
 [[headers]]
   for = "/*"
