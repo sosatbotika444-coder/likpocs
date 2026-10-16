@@ -16,7 +16,6 @@ export default defineRailway(() => {
     source: github(repo, { branch: 'main', rootDirectory: 'backend' }),
     healthcheck: '/api/health',
     healthcheckTimeout: 300,
-    preDeploy: 'alembic upgrade head && python -m app.seed',
     env: {
       DATABASE_URL: db.env.DATABASE_URL,
       ENVIRONMENT: 'production',
