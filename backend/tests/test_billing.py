@@ -23,7 +23,7 @@ def resident(client, token, billing=True, period_days=45):
     return response.json()
 
 
-def test_arbitrary_period_partial_and_full_payment_advance_cycle(client, operator_token):
+def test_arbitrary_period_partial_payment_then_full_payment_stays_paid_until_due(client, operator_token):
     room(client, operator_token)
     person = resident(client, operator_token, period_days=45)
     assert person["payment_period_days"] == 45
@@ -42,12 +42,10 @@ def test_arbitrary_period_partial_and_full_payment_advance_cycle(client, operato
     })
     assert remainder.status_code == 201, remainder.text
     current = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
-    assert current["billing_period_id"] != person["billing_period_id"]
-    assert current["billing_start"] == person["billing_end"]
-    assert current["billing_end"] == (date.fromisoformat(person["billing_end"]) + timedelta(days=45)).isoformat()
-    assert current["balance"] == "600000.00"
-    assert len(current["billing_history"]) == 2
-    assert current["billing_history"][1]["status"] == "PAID"
+    assert current["billing_period_id"] == person["billing_period_id"]
+    assert current["billing_status"] == "PAID"
+    assert current["balance"] == "0.00"
+    assert len(current["billing_history"]) == 1
 
 
 def test_payment_without_a_valid_billing_period_is_rejected(client, operator_token):
@@ -88,8 +86,9 @@ def test_explicit_end_date_applies_to_the_current_cycle_and_period_days_roll_for
     })
     assert payment.status_code == 201, payment.text
     renewed = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
-    assert renewed["billing_start"] == explicit_end.isoformat()
-    assert renewed["billing_end"] == (explicit_end + timedelta(days=30)).isoformat()
+    assert renewed["billing_period_id"] == person["billing_period_id"]
+    assert renewed["billing_status"] == "PAID"
+    assert renewed["balance"] == "0.00"
 
 
 def test_overpayment_cannot_be_silently_applied(client, operator_token):

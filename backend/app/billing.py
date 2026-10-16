@@ -1,12 +1,14 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit import audit
+from app.config import settings
 from app.models import BillingChange, BillingPeriod, Payment, PaymentAdjustment, Resident, User
 
 ZERO = Decimal("0.00")
@@ -36,7 +38,7 @@ def current_period(db: Session, resident_id: UUID) -> BillingPeriod | None:
 
 
 def ensure_period(db: Session, resident: Resident, actor: User | None, as_of: date | None = None) -> BillingPeriod | None:
-    if not resident.payment_period_days or not resident.billing_periods:
+    if not resident.payment_period_days:
         return None
     open_period = current_period(db, resident.id)
     if open_period:
@@ -47,6 +49,11 @@ def ensure_period(db: Session, resident: Resident, actor: User | None, as_of: da
         .order_by(BillingPeriod.end_date.desc(), BillingPeriod.created_at.desc())
     )
     if not latest or latest.status != "PAID":
+        return None
+    effective_date = as_of or datetime.now(ZoneInfo(settings.timezone)).date()
+    # A settled period does not create new debt before the next stay period starts.
+    # This keeps an early full payment visibly paid until its end date.
+    if latest.end_date > effective_date:
         return None
     start = latest.end_date
     period = BillingPeriod(

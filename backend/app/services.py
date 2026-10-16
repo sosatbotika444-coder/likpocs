@@ -48,6 +48,12 @@ def period_out(db: Session, period: BillingPeriod) -> BillingPeriodOut:
 def resident_out(db: Session, resident: Resident, as_of: date | None = None) -> ResidentOut:
     today = as_of or today_local()
     period = current_period(db, resident.id)
+    if period is None:
+        period = db.scalar(
+            select(BillingPeriod)
+            .where(BillingPeriod.resident_id == resident.id, BillingPeriod.status == "PAID")
+            .order_by(BillingPeriod.end_date.desc(), BillingPeriod.created_at.desc())
+        )
     paid = period_paid(db, period.id) if period else Decimal("0")
     balance = period_balance(db, period) if period else Decimal("0")
     configured = bool(

@@ -26,6 +26,7 @@ from app.audit import audit, notify
 from app.billing import (
     create_initial_period,
     current_period,
+    ensure_period,
     extend_period,
     mark_paid_and_advance,
     period_balance,
@@ -89,6 +90,24 @@ STATUS_UZ = {
 
 def page_result(items: list, total: int, skip: int, limit: int) -> PageInfo:
     return PageInfo(items=items, total=total, skip=skip, limit=limit)
+
+
+def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> None:
+    today = today_local()
+    created = False
+    for resident in residents:
+        if resident.is_archived or current_period(db, resident.id):
+            continue
+        latest = db.scalar(
+            select(BillingPeriod)
+            .where(BillingPeriod.resident_id == resident.id, BillingPeriod.status != "CLOSED")
+            .order_by(BillingPeriod.end_date.desc(), BillingPeriod.created_at.desc())
+        )
+        if latest and latest.status == "PAID" and latest.end_date <= today:
+            new_period = ensure_period(db, resident, actor, as_of=today)
+            created = created or bool(new_period and new_period.id != latest.id)
+    if created:
+        db.commit()
 
 
 def verify_room_capacity(db: Session, room_id: UUID | None, resident_id: UUID | None = None) -> Room | None:
@@ -316,7 +335,7 @@ def list_residents(
     q: str = "", room_id: UUID | None = None, payment_status: str = "all", archived: bool = False,
     sort: str = "last_name", direction: Literal["asc", "desc"] = "asc",
     skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> PageInfo:
     query = select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(archived))
     if room_id:
@@ -329,6 +348,7 @@ def list_residents(
     order_col = {"first_name": Resident.first_name, "created_at": Resident.created_at}.get(sort, Resident.last_name)
     query = query.order_by(order_col.desc() if direction == "desc" else order_col.asc())
     records = db.scalars(query).unique().all()
+    ensure_due_periods(db, records, actor)
     items = [resident_out(db, resident) for resident in records]
     if payment_status != "all":
         items = [item for item in items if item.billing_status == payment_status.upper()]
@@ -369,10 +389,11 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), acto
 
 
 @router.get("/residents/{resident_id}", response_model=ResidentDetail)
-def get_resident(resident_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> ResidentDetail:
+def get_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentDetail:
     resident = db.scalar(select(Resident).options(joinedload(Resident.room)).where(Resident.id == resident_id))
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
+    ensure_due_periods(db, [resident], actor)
     return resident_detail(db, resident)
 
 
@@ -422,6 +443,7 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
     audit(db, actor, "RESIDENT_UPDATED", "Resident", resident.id, {"changed_fields": sorted(values)})
     db.commit()
     db.refresh(resident)
+    ensure_due_periods(db, [resident], actor)
     return resident_out(db, resident)
 
 
@@ -448,6 +470,7 @@ def restore_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
     resident.archived_at = None
     audit(db, actor, "RESIDENT_RESTORED", "Resident", resident.id)
     db.commit()
+    ensure_due_periods(db, [resident], actor)
     return resident_out(db, resident)
 
 
@@ -500,6 +523,7 @@ def create_payment(payload: PaymentCreate, db: Session = Depends(get_db), actor:
     resident = db.get(Resident, payload.resident_id)
     if not resident or resident.is_archived:
         raise HTTPException(status_code=404, detail="Faol yashovchi topilmadi.")
+    ensure_due_periods(db, [resident], actor)
     period_id = payload.billing_period_id
     period = db.scalar(select(BillingPeriod).where(BillingPeriod.id == period_id).with_for_update()) if period_id else current_period(db, resident.id)
     if not period or period.resident_id != resident.id or period.status != "OPEN":
@@ -566,9 +590,10 @@ def list_adjustments(payment_id: UUID, db: Session = Depends(get_db), _: User = 
 
 
 @router.get("/dashboard", response_model=DashboardOut)
-def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> DashboardOut:
+def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> DashboardOut:
     today = today_local()
     residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
+    ensure_due_periods(db, residents, actor)
     active_rooms = db.scalars(select(Room).where(Room.is_active.is_(True)).order_by(Room.number)).all()
     items = [resident_out(db, item, today) for item in residents]
     capacity = sum(room.capacity for room in active_rooms)
@@ -608,9 +633,10 @@ def dashboard(db: Session = Depends(get_db), _: User = Depends(get_current_user)
 
 
 @router.get("/notifications", response_model=list[NotificationOut])
-def list_notifications(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[NotificationOut]:
+def list_notifications(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> list[NotificationOut]:
     today = today_local()
     residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
+    ensure_due_periods(db, residents, actor)
     now = datetime.now(UTC)
     created = False
     for resident in residents:
@@ -733,10 +759,13 @@ def export_report(
     file_format: Literal["csv", "xlsx", "pdf"],
     date_from: date | None = None, date_to: date | None = None,
     interval: Literal["day", "week", "month"] = "month",
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> Response:
     if date_from and date_to and date_to < date_from:
         raise HTTPException(status_code=422, detail="Yakuniy sana boshlang‘ich sanadan oldin bo‘lishi mumkin emas.")
+    if kind in {"residents", "debts", "overdue"}:
+        residents = db.scalars(select(Resident).where(Resident.is_archived.is_(False))).all()
+        ensure_due_periods(db, residents, actor)
     headers, rows = get_report_rows(db, kind, date_from, date_to, interval)
     name = f"dormflow-{kind}-{today_local().isoformat()}"
     if file_format == "csv":
