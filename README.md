@@ -91,3 +91,56 @@ The tests use isolated in-memory SQLite and cover role restrictions, room capaci
 Use HTTPS termination at a trusted reverse proxy or managed ingress, restrict `CORS_ORIGINS`, use strong independent secrets, restrict access to the PostgreSQL network, and back up the PostgreSQL volume on a schedule. Configure monitoring against `/api/health`. Build and deploy immutable images from a reviewed commit; do not publish `.env` or database backups with the repository. Set `ENVIRONMENT=production` so the API rejects placeholder JWT secrets and a missing operator password.
 
 The included Compose file is a single-host deployment baseline. For a production service, add an external TLS ingress, automated encrypted off-host backups, and a controlled migration/rollback procedure appropriate to the hosting platform.
+
+## Railway (API + PostgreSQL) and Netlify (frontend)
+
+Deployment files are included for the GitHub repository `sosatbotika444-coder/likpocs`. Push the deployment changes to the `main` branch before connecting the services. Railway's configuration is an Infrastructure as Code project definition: apply it only to a new, empty Railway project because it manages the complete Railway environment.
+
+### Railway
+
+1. Install the Railway CLI and log in:
+
+   ```powershell
+   npm.cmd install -g @railway/cli
+   railway login
+   ```
+
+2. From the repository root, run the one-time setup script:
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\deploy-railway.ps1
+   ```
+
+   It creates/links a new Railway project, asks for the first operator's email, name, and password, generates a private JWT signing key, and applies `.railway/railway.ts`. Railway provisions PostgreSQL, links its `DATABASE_URL` to the API, runs Alembic migrations and the idempotent operator bootstrap before the API starts, and checks `/api/health`. The operator password is read securely and the signing key is generated in memory; neither is written to the repository.
+
+3. The setup script attempts to create the API's public HTTPS domain. If the deployment is not ready yet, create it after deployment:
+
+   ```powershell
+   railway domain --service dormflow-api
+   ```
+
+   Keep the resulting `https://….up.railway.app` address for the Netlify setup. Do not expose PostgreSQL publicly. Railway provides the PostgreSQL `DATABASE_URL` through an inter-service variable reference; the backend converts Railway's `postgres://`/`postgresql://` scheme to the installed psycopg 3 SQLAlchemy driver automatically.
+
+### Netlify
+
+1. Install and authenticate the Netlify CLI, then connect this repository to a new Netlify site from the repository root:
+
+   ```powershell
+   npm.cmd install -g netlify-cli
+   netlify login
+   netlify init
+   ```
+
+   Netlify reads the root `netlify.toml`: base directory `frontend`, Node.js 24, `npm ci`, the TypeScript/Vite production build, and the `dist` publish directory.
+
+2. Run the production setup/deploy script and paste in the Railway API domain when asked:
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\deploy-netlify.ps1
+   ```
+
+   This sets the `RAILWAY_API_URL` build variable for all Netlify deploy contexts, builds the frontend, writes the API proxy and SPA fallback to `dist/_redirects`, then deploys production. The browser continues calling same-origin `/api`; Netlify forwards that path to Railway, so the frontend build does not need a hardcoded API address or CORS allowlist. Keep `RAILWAY_API_URL` as the HTTPS origin only (no `/api` suffix).
+
+After setup, GitHub pushes to `main` trigger builds on both providers. Railway uses `backend/` as the API root and Netlify uses `frontend/` as its build base. The Railway setup script is for a new project bootstrap; routine code releases should use the connected GitHub autodeploys. For a changed API domain, update `RAILWAY_API_URL` in Netlify and redeploy.
+
+Before using real resident and payment data, enable PostgreSQL backups/point-in-time recovery appropriate to the Railway plan and verify a restore procedure. Database backups are not stored in this repository.

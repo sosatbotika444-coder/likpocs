@@ -14,6 +14,6 @@ if __name__ == "__main__":
         "app.main:app",
         app_dir=str(BACKEND_DIR),
         host=os.getenv("DORMFLOW_HOST", "127.0.0.1"),
-        port=int(os.getenv("DORMFLOW_PORT", "8000")),
+        port=int(os.getenv("DORMFLOW_PORT", "8001")),
         reload=os.getenv("DORMFLOW_RELOAD", "false").lower() == "true",
     )

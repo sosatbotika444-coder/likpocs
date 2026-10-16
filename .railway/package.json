@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "allowScripts": {
+    "esbuild": true
+  },
+  "dependencies": {
+    "railway": "3.12.0"
+  }
+}

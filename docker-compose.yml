@@ -18,6 +18,7 @@ services:
     build:
       context: ./backend
     restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && python -m app.seed && exec uvicorn app.main:app --host 0.0.0.0 --port $${PORT:-8000} --proxy-headers"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-dormflow}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-dormflow}

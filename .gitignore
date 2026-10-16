@@ -12,6 +12,7 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/coverage/
+.netlify/
 backend/.ruff_cache/
 *.log
 .DS_Store
