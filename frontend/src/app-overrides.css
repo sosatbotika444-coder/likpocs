@@ -1,0 +1,5 @@
+.page-heading h2.ant-typography,
+.login-form-wrap h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+}

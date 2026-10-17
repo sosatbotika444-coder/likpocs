@@ -16,11 +16,12 @@ import Rooms from './pages/Rooms';
 import Payments from './pages/Payments';
 import Reports from './pages/Reports';
 import SettingsPage from './pages/Settings';
+import Landing from './pages/Landing';
 
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 const routeTitles: Record<string, string> = {
-  '/': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
+  '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
   '/payments': uz.nav.payments, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
 };
 
@@ -28,6 +29,7 @@ function Login() {
   const { login, user, loading } = useAuth();
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
   const [notice, contextHolder] = notification.useNotification();
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -35,13 +37,14 @@ function Login() {
     setBusy(true);
     try {
       await login(String(form.get('email')), String(form.get('password')));
-      navigate('/', { replace: true });
+      const destination = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
+      navigate(destination || '/app', { replace: true });
     } catch (error) {
       notice.error({ message: 'Tizimga kirib bo‘lmadi', description: errorMessage(error), placement: 'topRight' });
     } finally { setBusy(false); }
   };
   if (loading) return <div className="auth-loading"><Spin size="large" /></div>;
-  if (user) return <Navigate to="/" replace />;
+  if (user) return <Navigate to="/app" replace />;
   return <main className="login-page">
     {contextHolder}
     <section className="login-art">
@@ -75,7 +78,7 @@ function Shell() {
   useEffect(() => { void loadAlerts(); }, []);
 
   const menuItems = useMemo(() => [
-    { key: '/', icon: <AppstoreOutlined />, label: uz.nav.dashboard },
+    { key: '/app', icon: <AppstoreOutlined />, label: uz.nav.dashboard },
     { key: '/residents', icon: <TeamOutlined />, label: uz.nav.residents },
     { key: '/rooms', icon: <HomeOutlined />, label: uz.nav.rooms },
     { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
@@ -122,8 +125,15 @@ function Shell() {
 
 function Protected() {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) return <div className="auth-loading"><Spin size="large"/></div>;
-  return user ? <Shell/> : <Navigate to="/login" replace/>;
+  return user ? <Shell/> : <Navigate to="/login" replace state={{ from: location }}/>;
+}
+
+function Home() {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="auth-loading"><Spin size="large" /></div>;
+  return user ? <Navigate to="/app" replace /> : <Landing />;
 }
 
 function OperatorOnly({ children }: { children: ReactNode }) {
@@ -134,9 +144,10 @@ function OperatorOnly({ children }: { children: ReactNode }) {
 
 export default function App() {
   return <Routes>
+    <Route path="/" element={<Home/>}/>
     <Route path="/login" element={<Login/>}/>
     <Route element={<Protected/>}>
-      <Route path="/" element={<Dashboard/>}/>
+      <Route path="/app" element={<Dashboard/>}/>
       <Route path="/residents" element={<Residents/>}/>
       <Route path="/rooms" element={<Rooms/>}/>
       <Route path="/payments" element={<Payments/>}/>
