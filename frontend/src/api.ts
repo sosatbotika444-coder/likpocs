@@ -1,6 +1,6 @@
 import axios, { type AxiosError } from 'axios';
 
-const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE || '/api', timeout: 20000 });
+const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE || '/api', timeout: 20000, withCredentials: true });
 const ACCESS_KEY = 'dormflow.access';
 const REFRESH_KEY = 'dormflow.refresh';
 

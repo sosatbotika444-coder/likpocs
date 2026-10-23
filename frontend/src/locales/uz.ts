@@ -4,6 +4,7 @@ export const uz = {
     dashboard: 'Boshqaruv paneli', residents: 'Yashovchilar', rooms: 'Xonalar',
     payments: 'To‘lovlar', reports: 'Hisobotlar', settings: 'Sozlamalar',
     users: 'Foydalanuvchilar', audit: 'Faollik jurnali',
+    admissions: 'Qabul',
   },
   common: {
     add: 'Qo‘shish', create: 'Yaratish', save: 'Saqlash', cancel: 'Bekor qilish',

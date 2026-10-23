@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api import router
+from app.admissions_api import public_router, staff_router
 from app.config import settings
 
 
@@ -31,7 +32,7 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
 
 
@@ -39,8 +40,11 @@ app.add_middleware(
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(self)"
+    if request.url.path.startswith("/api/public"):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -55,6 +59,8 @@ async def database_error(_: Request, __: SQLAlchemyError) -> JSONResponse:
 
 
 app.include_router(router)
+app.include_router(staff_router)
+app.include_router(public_router)
 
 
 @app.get("/", include_in_schema=False)

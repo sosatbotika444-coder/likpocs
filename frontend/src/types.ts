@@ -1,7 +1,7 @@
 export type Role = 'OPERATOR' | 'ADMIN';
 export type User = { id: string; email: string; full_name: string; role: Role; is_active: boolean; is_primary: boolean; created_at: string };
 export type Room = {
-  id: string; number: string; floor: number; capacity: number; price: number | null; notes: string;
+  id: string; dormitory_id: string; number: string; floor: number; capacity: number; price: number | null; notes: string;
   is_active: boolean; resident_count: number; available_beds: number;
 };
 export type Resident = {
@@ -39,3 +39,41 @@ export type Dashboard = {
 export type SystemSettings = { dorm_name: string; default_period_days: number; currency: 'UZS'; updated_at: string | null; billing_change_allowed: boolean };
 export type AuditEvent = { id: string; actor_id: string | null; actor_name: string; action: string; entity_type: string; entity_id: string | null; details: Record<string, unknown>; created_at: string };
 export type PaymentAdjustment = { id: string; payment_id: string; amount_delta: number; reason: string; adjusted_by: string; created_at: string };
+export type Dormitory = { id: string; name: string; address: string; is_default: boolean; is_active: boolean };
+export type Campaign = {
+  id: string; name: string; dormitory_id: string; status: string; custom_fields: CustomField[];
+  document_types: string[]; consent_version: string; consent_text: string; created_at: string;
+};
+export type CustomField = { key: string; label: string; kind: 'text' | 'date' | 'select' | 'checkbox'; required: boolean; options: string[] };
+export type Invitation = {
+  id: string; campaign_id: string; dormitory_id: string; expires_at: string; max_submissions: number;
+  submission_count: number; paused_at: string | null; revoked_at: string | null; created_at: string;
+  status: 'ACTIVE' | 'PAUSED' | 'REVOKED' | 'EXPIRED' | 'EXHAUSTED'; link?: string | null;
+};
+export type ApplicationData = {
+  first_name_latin: string; last_name_latin: string; middle_name_latin: string;
+  first_name_cyrillic: string; last_name_cyrillic: string; middle_name_cyrillic: string;
+  birth_date: string | null; nationality: string; gender: 'FEMALE' | 'MALE' | null;
+  phone: string; email: string; address: string; emergency_name: string; emergency_phone: string;
+  institution: string; faculty: string; course: string; study_group: string;
+  study_start: string | null; study_end: string | null; requested_move_in: string | null; requested_move_out: string | null;
+  preferences: string; additional_data: Record<string, string | boolean | null>;
+};
+export type ApplicationFile = {
+  id: string; kind: 'PHOTO' | 'DOCUMENT'; document_type: string; original_name: string;
+  content_type: string; size_bytes: number; scan_status: string; uploaded_at: string;
+};
+export type ApplicationEvent = { from_status: string; to_status: string; reason: string; created_at: string };
+export type Application = ApplicationData & {
+  id: string; reference: string; status: string; requested_fields: string[]; review_reason: string;
+  consent_version: string; invitation_id: string; campaign_id: string; dormitory_id: string;
+  resident_id: string | null; assigned_to: string | null; internal_notes: string;
+  files: ApplicationFile[]; events: ApplicationEvent[]; created_at: string; updated_at: string;
+};
+export type ApplicationQueueItem = {
+  id: string; reference: string; status: string; first_name_latin: string; last_name_latin: string;
+  phone: string; campaign_id: string; dormitory_id: string; assigned_to: string | null; created_at: string;
+};
+export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string };
+export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string };
+export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; uploads_enabled: boolean; ocr_configured: boolean; antivirus_configured: boolean };

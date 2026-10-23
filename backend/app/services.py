@@ -2,12 +2,12 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.billing import current_period, period_balance, period_paid
 from app.config import settings
-from app.models import AuditEvent, BillingChange, BillingPeriod, Notification, Payment, PaymentAdjustment, Resident, Room, User
+from app.models import AuditEvent, BillingChange, BillingPeriod, Notification, Payment, PaymentAdjustment, Resident, ResidencePeriod, Room, User
 from app.schemas import AuditEventOut, BillingChangeOut, BillingPeriodOut, NotificationOut, PaymentOut, ResidentDetail, ResidentOut, RoomOut
 
 
@@ -16,10 +16,25 @@ def today_local() -> date:
 
 
 def room_out(db: Session, room: Room) -> RoomOut:
-    residents = db.scalars(select(Resident).where(Resident.room_id == room.id, Resident.is_archived.is_(False))).all()
-    resident_count = len(residents)
+    today = today_local()
+    resident_count = db.scalar(
+        select(func.count(ResidencePeriod.id)).where(
+            ResidencePeriod.room_id == room.id,
+            ResidencePeriod.start_date <= today,
+            or_(ResidencePeriod.end_date.is_(None), ResidencePeriod.end_date > today),
+        )
+    ) or 0
+    legacy_count = db.scalar(
+        select(func.count(Resident.id)).where(
+            Resident.room_id == room.id,
+            Resident.is_archived.is_(False),
+            ~Resident.id.in_(select(ResidencePeriod.resident_id)),
+        )
+    ) or 0
+    resident_count += legacy_count
     return RoomOut(
         id=room.id,
+        dormitory_id=room.dormitory_id,
         number=room.number,
         floor=room.floor,
         capacity=room.capacity,

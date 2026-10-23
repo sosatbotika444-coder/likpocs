@@ -62,6 +62,8 @@ See `.env.example` for the supported variables. Important settings:
 | `TIMEZONE` | Billing and date boundary, defaults to `Asia/Tashkent` |
 | `ADMINS_CAN_ADJUST_BILLING` | Lets administrators change billing configuration when explicitly enabled |
 | `CORS_ORIGINS` | Comma-separated trusted browser origins |
+| `PUBLIC_APP_URL` | Public frontend origin used when generating `/apply` invitation links |
+| `FILE_STORAGE_BACKEND`, `S3_*`, `FILE_RETENTION_DAYS` | Private production file storage and the organization-approved retention period |
 
 The billing convention uses `[start_date, end_date)`: a cycle includes its start date and ends immediately before its end date. The following cycle starts on the preceding cycle's end date. Period extensions update the open cycle and create an immutable billing-change record; they never create a payment. Actual payment records are append-only. Operators correct them by adding a signed adjustment with a reason.
 
@@ -71,6 +73,22 @@ The billing convention uses `[start_date, end_date)`: a cycle includes its start
 - **Administrator:** resident and room operations, payment recording, balances, and reports. Administrators cannot manage accounts, inspect the audit log, adjust historical payments, or change billing settings unless the billing configuration flag is enabled.
 
 Authorization is checked by the API. Hiding a button in the browser is not the access control boundary.
+
+## Admissions and room assignment
+
+Operators create dormitories and admission campaigns. Administrators and operators can issue limited invitations, review applications, request missing information, inspect uploaded files, and approve a room stay. Approval creates or links a resident and records a dated residence period; it does not create a billing period or payment.
+
+Applicants open the invitation at `/apply`. The link secret is carried in the URL fragment and removed before the page exchanges it for a short-lived, HTTP-only session. After the first submission, the applicant receives a one-time access code for later status checks and clarification requests. Only a hash of that code is stored. Staff can issue a replacement after manually checking identity.
+
+Development uses the private `private-files/` directory. Production uploads are disabled until `FILE_STORAGE_BACKEND=s3`, the private S3-compatible bucket and credentials are configured, and the organization sets `FILE_RETENTION_DAYS` to its approved period. Configure the bucket without public access. OCR and antivirus scanning are not connected; staff review remains manual and the interface shows that status.
+
+Files scheduled for deletion are purged in bounded batches. Configure a platform scheduler to run this from the backend service at an appropriate interval:
+
+```powershell
+python -m app.purge_expired_files --batch-size 100
+```
+
+The purge command logs only aggregate counts. Files in abandoned drafts expire after the configured period; rejected applications are scheduled for deletion after that period; approved application files are scheduled when the linked resident is archived.
 
 ## Data exports and optional sample rooms
 
@@ -84,11 +102,11 @@ From `backend/`, run:
 ..\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests use isolated in-memory SQLite and cover role restrictions, room capacity, arbitrary billing periods, payment allocation, extensions, and financial corrections. The release database remains PostgreSQL.
+The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, private file access, arbitrary billing periods, payment allocation, extensions, and financial corrections. The release database remains PostgreSQL.
 
 ## Production deployment
 
-Use HTTPS termination at a trusted reverse proxy or managed ingress, restrict `CORS_ORIGINS`, use strong independent secrets, restrict access to the PostgreSQL network, and back up the PostgreSQL volume on a schedule. Configure monitoring against `/api/health`. Build and deploy immutable images from a reviewed commit; do not publish `.env` or database backups with the repository. Set `ENVIRONMENT=production` so the API rejects placeholder JWT secrets and a missing operator password.
+Use HTTPS termination at a trusted reverse proxy or managed ingress, set `PUBLIC_APP_URL` to the deployed frontend origin, restrict `CORS_ORIGINS`, use strong independent secrets, restrict access to the PostgreSQL network, and back up the PostgreSQL volume on a schedule. Before accepting applications, configure private S3-compatible storage and the organization-approved `FILE_RETENTION_DAYS`; production uploads stay disabled until both are set. Configure monitoring against `/api/health`. Build and deploy immutable images from a reviewed commit; do not publish `.env` or database backups with the repository. Set `ENVIRONMENT=production` so the API rejects placeholder JWT secrets and a missing operator password.
 
 The included Compose file is a single-host deployment baseline. For a production service, add an external TLS ingress, automated encrypted off-host backups, and a controlled migration/rollback procedure appropriate to the hosting platform.
 

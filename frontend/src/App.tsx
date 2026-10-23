@@ -3,7 +3,7 @@ import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 
 import { Avatar, Badge, Button, Dropdown, Layout, Menu, Spin, Typography, Grid, Drawer, notification } from 'antd';
 import {
   AppstoreOutlined, BellOutlined, FileExcelOutlined,
-  HomeOutlined, LogoutOutlined, MenuOutlined, SettingOutlined, TeamOutlined, UserOutlined,
+  HomeOutlined, LogoutOutlined, MenuOutlined, SettingOutlined, TeamOutlined, UserOutlined, SolutionOutlined,
   WalletOutlined, AuditOutlined, QuestionCircleOutlined,
 } from '@ant-design/icons';
 import { api, errorMessage } from './api';
@@ -17,12 +17,14 @@ import Payments from './pages/Payments';
 import Reports from './pages/Reports';
 import SettingsPage from './pages/Settings';
 import Landing from './pages/Landing';
+import Admissions, { PublicApplication } from './pages/Admissions';
 
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 const routeTitles: Record<string, string> = {
   '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
   '/payments': uz.nav.payments, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
+  '/admissions': uz.nav.admissions,
 };
 
 function Login() {
@@ -81,6 +83,7 @@ function Shell() {
     { key: '/app', icon: <AppstoreOutlined />, label: uz.nav.dashboard },
     { key: '/residents', icon: <TeamOutlined />, label: uz.nav.residents },
     { key: '/rooms', icon: <HomeOutlined />, label: uz.nav.rooms },
+    { key: '/admissions', icon: <SolutionOutlined />, label: uz.nav.admissions },
     { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
     { key: '/reports', icon: <FileExcelOutlined />, label: uz.nav.reports },
     { type: 'divider' as const },
@@ -146,10 +149,12 @@ export default function App() {
   return <Routes>
     <Route path="/" element={<Home/>}/>
     <Route path="/login" element={<Login/>}/>
+    <Route path="/apply" element={<PublicApplication/>}/>
     <Route element={<Protected/>}>
       <Route path="/app" element={<Dashboard/>}/>
       <Route path="/residents" element={<Residents/>}/>
       <Route path="/rooms" element={<Rooms/>}/>
+      <Route path="/admissions" element={<Admissions/>}/>
       <Route path="/payments" element={<Payments/>}/>
       <Route path="/reports" element={<Reports/>}/>
       <Route path="/settings" element={<SettingsPage/>}/>

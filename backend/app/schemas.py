@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -50,6 +52,7 @@ class UserUpdate(BaseModel):
 
 class RoomBase(BaseModel):
     number: str = Field(min_length=1, max_length=32)
+    dormitory_id: UUID | None = None
     floor: int = Field(default=1, ge=0, le=300)
     capacity: int = Field(ge=1, le=500)
     price: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
@@ -62,6 +65,7 @@ class RoomCreate(RoomBase):
 
 class RoomUpdate(BaseModel):
     number: str | None = Field(default=None, min_length=1, max_length=32)
+    dormitory_id: UUID | None = None
     floor: int | None = Field(default=None, ge=0, le=300)
     capacity: int | None = Field(default=None, ge=1, le=500)
     price: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
@@ -70,6 +74,7 @@ class RoomUpdate(BaseModel):
 
 class RoomOut(ORMModel):
     id: UUID
+    dormitory_id: UUID
     number: str
     floor: int
     capacity: int
@@ -294,3 +299,249 @@ class AuditEventOut(ORMModel):
     entity_id: UUID | None
     details: dict
     created_at: datetime
+
+
+class DormitoryOut(ORMModel):
+    id: UUID
+    name: str
+    address: str
+    is_default: bool
+    is_active: bool
+
+
+class DormitoryCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    address: str = Field(default="", max_length=500)
+
+
+class DormitoryUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    address: str | None = Field(default=None, max_length=500)
+    is_active: bool | None = None
+
+
+class CustomFieldDefinition(BaseModel):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,39}$")
+    label: str = Field(min_length=1, max_length=120)
+    kind: Literal["text", "date", "select", "checkbox"]
+    required: bool = False
+    options: list[str] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def validate_options(self):
+        options = [item.strip() for item in self.options]
+        if any(not item or len(item) > 120 for item in options) or len(options) != len(set(options)):
+            raise ValueError("Tanlov variantlari bosh yoki takroriy bolmasligi kerak.")
+        if self.kind == "select" and not options:
+            raise ValueError("Tanlov maydoni uchun kamida bitta variant kiriting.")
+        self.options = options
+        return self
+
+
+class CampaignCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    dormitory_id: UUID
+    custom_fields: list[CustomFieldDefinition] = Field(default_factory=list, max_length=30)
+    document_types: list[str] = Field(default_factory=lambda: ["ID", "STUDY_PROOF"], max_length=20)
+    consent_version: str = Field(default="2026-01", min_length=1, max_length=40)
+    consent_text: str = Field(min_length=10, max_length=2000)
+
+
+class CampaignOut(ORMModel):
+    id: UUID
+    name: str
+    dormitory_id: UUID
+    status: str
+    custom_fields: list[dict]
+    document_types: list[str]
+    consent_version: str
+    consent_text: str
+    created_at: datetime
+
+
+class PublicCampaignOut(BaseModel):
+    name: str
+    custom_fields: list[dict]
+    document_types: list[str]
+    consent_version: str
+    consent_text: str
+
+
+class PublicSessionOut(BaseModel):
+    csrf_token: str
+    campaign: PublicCampaignOut
+    application: PublicApplicationOut
+
+
+class InvitationExchangeIn(BaseModel):
+    token: str = Field(min_length=24, max_length=128)
+    draft_key: str = Field(min_length=16, max_length=128)
+
+
+class PublicInviteOut(BaseModel):
+    campaign: PublicCampaignOut
+    csrf_token: str
+
+
+class InvitationCreate(BaseModel):
+    campaign_id: UUID
+    expires_at: datetime
+    max_submissions: int = Field(ge=1, le=10000)
+
+
+class InvitationOut(ORMModel):
+    id: UUID
+    campaign_id: UUID
+    dormitory_id: UUID
+    expires_at: datetime
+    max_submissions: int
+    submission_count: int
+    paused_at: datetime | None
+    revoked_at: datetime | None
+    created_at: datetime
+    status: str
+    link: str | None = None
+
+
+class ApplicationDraftIn(BaseModel):
+    first_name_latin: str = Field(default="", max_length=80)
+    last_name_latin: str = Field(default="", max_length=100)
+    middle_name_latin: str = Field(default="", max_length=100)
+    first_name_cyrillic: str = Field(default="", max_length=80)
+    last_name_cyrillic: str = Field(default="", max_length=100)
+    middle_name_cyrillic: str = Field(default="", max_length=100)
+    birth_date: date | None = None
+    nationality: str = Field(default="", max_length=100)
+    gender: Literal["FEMALE", "MALE"] | None = None
+    phone: str = Field(default="", max_length=40)
+    email: str = Field(default="", max_length=320)
+    address: str = Field(default="", max_length=500)
+    emergency_name: str = Field(default="", max_length=160)
+    emergency_phone: str = Field(default="", max_length=40)
+    institution: str = Field(default="", max_length=200)
+    faculty: str = Field(default="", max_length=160)
+    course: str = Field(default="", max_length=40)
+    study_group: str = Field(default="", max_length=80)
+    study_start: date | None = None
+    study_end: date | None = None
+    requested_move_in: date | None = None
+    requested_move_out: date | None = None
+    preferences: str = Field(default="", max_length=2000)
+    additional_data: dict[str, str | bool | None] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if self.study_start and self.study_end and self.study_end <= self.study_start:
+            raise ValueError("O‘qish tugash sanasi boshlanishidan keyin bo‘lishi kerak.")
+        if self.requested_move_in and self.requested_move_out and self.requested_move_out <= self.requested_move_in:
+            raise ValueError("Yashash tugash sanasi boshlanishidan keyin bo‘lishi kerak.")
+        return self
+
+
+class ApplicationSubmitIn(BaseModel):
+    consent: bool
+
+
+class PublicApplicationOut(ApplicationDraftIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    reference: str
+    status: str
+    requested_fields: list[str]
+    review_reason: str
+    consent_version: str
+
+
+class ApplicationFileOut(ORMModel):
+    id: UUID
+    kind: str
+    document_type: str
+    original_name: str
+    content_type: str
+    size_bytes: int
+    scan_status: str
+    uploaded_at: datetime
+
+
+class ApplicationStatusEventOut(ORMModel):
+    from_status: str
+    to_status: str
+    reason: str
+    created_at: datetime
+
+
+class ApplicationOut(PublicApplicationOut):
+    id: UUID
+    invitation_id: UUID
+    campaign_id: UUID
+    dormitory_id: UUID
+    resident_id: UUID | None
+    assigned_to: UUID | None
+    internal_notes: str
+    files: list[ApplicationFileOut] = Field(default_factory=list)
+    events: list[ApplicationStatusEventOut] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ApplicationQueueOut(BaseModel):
+    id: UUID
+    reference: str
+    status: str
+    first_name_latin: str
+    last_name_latin: str
+    phone: str
+    campaign_id: UUID
+    dormitory_id: UUID
+    assigned_to: UUID | None
+    created_at: datetime
+
+
+class ApplicationStatusIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class ApplicationRequestInfoIn(ApplicationStatusIn):
+    fields: list[str] = Field(min_length=1, max_length=30)
+
+
+class ApplicationNoteIn(BaseModel):
+    internal_notes: str = Field(max_length=10000)
+
+
+class ApplicationApproveIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    room_id: UUID
+    move_in: date
+    move_out: date | None = None
+    resident_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def ordered_stay(self):
+        if self.move_out and self.move_out <= self.move_in:
+            raise ValueError("Yashash tugash sanasi boshlanishidan keyin bo‘lishi kerak.")
+        return self
+
+
+class ApplicationRejectIn(ApplicationStatusIn):
+    pass
+
+
+class PublicStatusAccessIn(BaseModel):
+    access_code: str = Field(min_length=12, max_length=80)
+
+
+class PublicStatusOut(BaseModel):
+    reference: str
+    status: str
+    requested_fields: list[str]
+    review_reason: str
+
+
+class PublicStatusAccessOut(BaseModel):
+    csrf_token: str
+    status: PublicStatusOut
+
+
+class RetentionSettingsIn(BaseModel):
+    retention_days: int = Field(ge=1, le=36500)

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.audit import audit
 from app.config import settings
-from app.models import SystemSetting, User
+from app.models import Dormitory, SystemSetting, User
 from app.security import hash_password
 
 
@@ -25,4 +25,8 @@ def bootstrap(db: Session) -> None:
         audit(db, operator, "OPERATOR_BOOTSTRAPPED", "User", operator.id)
     if not db.get(SystemSetting, "general"):
         db.add(SystemSetting(key="general", value={"dorm_name": "DormFlow", "default_period_days": 30, "currency": "UZS"}, updated_by=operator.id))
+    if not db.scalar(select(Dormitory).where(Dormitory.is_default.is_(True))):
+        general = db.get(SystemSetting, "general")
+        dormitory_name = (general.value.get("dorm_name") if general else None) or "DormFlow"
+        db.add(Dormitory(name=dormitory_name, is_default=True, is_active=True))
     db.commit()

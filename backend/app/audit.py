@@ -7,6 +7,7 @@ from app.models import AuditEvent, Notification, User
 
 
 def audit(
+    
     db: Session,
     actor: User | None,
     action: str,
@@ -29,3 +30,5 @@ def notify(db: Session, title: str, message: str, kind: str = "INFO", entity_id:
     item = Notification(title=title, message=message, kind=kind, entity_id=entity_id)
     db.add(item)
     return item
+
+

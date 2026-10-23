@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     initial_operator_name: str = "Bosh operator"
     timezone: str = "Asia/Tashkent"
     admins_can_adjust_billing: bool = False
+    file_storage_backend: str = "local"
+    file_local_directory: str = "./private-files"
+    file_retention_days: int | None = Field(default=None, ge=1, le=36500)
+    file_max_bytes: int = Field(default=10_485_760, ge=1024, le=104_857_600)
+    public_app_url: str = "http://localhost:5173"
+    s3_endpoint_url: str = ""
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

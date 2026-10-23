@@ -14,5 +14,6 @@ frontend/.vite/
 frontend/coverage/
 .netlify/
 backend/.ruff_cache/
+private-files/
 *.log
 .DS_Store

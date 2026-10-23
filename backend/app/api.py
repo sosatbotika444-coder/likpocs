@@ -38,14 +38,18 @@ from app.db import get_db
 from app.dependencies import get_current_user, require_billing_permission, require_operator
 from app.models import (
     AuditEvent,
+    ApplicationFile,
     BillingChange,
     BillingPeriod,
+    Dormitory,
     Notification,
     Payment,
     PaymentAdjustment,
     Resident,
+    ResidencePeriod,
     Room,
     SystemSetting,
+    StudentApplication,
     User,
 )
 from app.schemas import (
@@ -77,6 +81,7 @@ from app.schemas import (
 )
 from app.security import create_token_pair, hash_password, verify_password
 from app.services import audit_out, notification_out, payment_out, resident_detail, resident_out, room_out, today_local
+from app.residency import assert_room_available, close_open_period, record_room_assignment
 
 router = APIRouter(prefix="/api")
 UZ_MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
@@ -110,20 +115,17 @@ def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> N
         db.commit()
 
 
-def verify_room_capacity(db: Session, room_id: UUID | None, resident_id: UUID | None = None) -> Room | None:
+def verify_room_capacity(db: Session, room_id: UUID | None, resident_id: UUID | None = None, start_date: date | None = None, end_date: date | None = None) -> Room | None:
     if room_id is None:
         return None
-    room = db.scalar(select(Room).where(Room.id == room_id).with_for_update())
-    if not room or not room.is_active:
-        raise HTTPException(status_code=422, detail="Tanlangan xona topilmadi yoki faol emas.")
-    query = select(func.count(Resident.id)).where(Resident.room_id == room_id, Resident.is_archived.is_(False))
-    if resident_id:
-        query = query.where(Resident.id != resident_id)
-    occupants = db.scalar(query) or 0
-    if occupants >= room.capacity:
-        raise HTTPException(status_code=409, detail="Xonada bo‘sh o‘rin qolmagan.")
-    return room
-
+    resident = db.get(Resident, resident_id) if resident_id else None
+    return assert_room_available(
+        db,
+        room_id,
+        start_date or (resident.check_in_date if resident and resident.check_in_date else today_local()),
+        end_date,
+        exclude_resident_id=resident_id,
+    )
 
 def net_payment(db: Session, payment: Payment) -> Decimal:
     adjustments = db.scalars(select(PaymentAdjustment).where(PaymentAdjustment.payment_id == payment.id)).all()
@@ -282,7 +284,16 @@ def list_rooms(
 
 @router.post("/rooms", response_model=RoomOut, status_code=201)
 def create_room(payload: RoomCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> RoomOut:
-    room = Room(number=payload.number.strip(), floor=payload.floor, capacity=payload.capacity, price=payload.price, notes=payload.notes.strip())
+    dormitory = db.get(Dormitory, payload.dormitory_id) if payload.dormitory_id else db.scalar(select(Dormitory).where(Dormitory.is_default.is_(True)))
+    if payload.dormitory_id and dormitory is None:
+        raise HTTPException(status_code=422, detail="Yotoqxona topilmadi.")
+    if dormitory is None:
+        dormitory = Dormitory(name="DormFlow", is_default=True, is_active=True)
+        db.add(dormitory)
+        db.flush()
+    if not dormitory.is_active:
+        raise HTTPException(status_code=422, detail="Faol yotoqxonani tanlang.")
+    room = Room(dormitory_id=dormitory.id, number=payload.number.strip(), floor=payload.floor, capacity=payload.capacity, price=payload.price, notes=payload.notes.strip())
     db.add(room)
     db.flush()
     audit(db, actor, "ROOM_CREATED", "Room", room.id, {"number": room.number})
@@ -301,6 +312,13 @@ def update_room(room_id: UUID, payload: RoomUpdate, db: Session = Depends(get_db
     if not room or not room.is_active:
         raise HTTPException(status_code=404, detail="Xona topilmadi.")
     values = payload.model_dump(exclude_unset=True)
+    if "dormitory_id" in values and values["dormitory_id"] != room.dormitory_id:
+        target_dormitory = db.get(Dormitory, values["dormitory_id"]) if values["dormitory_id"] else None
+        if not target_dormitory or not target_dormitory.is_active:
+            raise HTTPException(status_code=422, detail="Faol yotoqxonani tanlang.")
+        assigned_periods = db.scalar(select(func.count(ResidencePeriod.id)).where(ResidencePeriod.room_id == room.id)) or 0
+        if assigned_periods:
+            raise HTTPException(status_code=409, detail="Yashash tarixi bor xonaning yotoqxonasini almashtirib bo‘lmaydi.")
     occupant_count = db.scalar(select(func.count(Resident.id)).where(Resident.room_id == room.id, Resident.is_archived.is_(False))) or 0
     if values.get("capacity", room.capacity) < occupant_count:
         raise HTTPException(status_code=409, detail=f"Xonada {occupant_count} nafar yashovchi bor. Sig‘imni kamaytirib bo‘lmaydi.")
@@ -321,7 +339,9 @@ def archive_room(room_id: UUID, db: Session = Depends(get_db), actor: User = Dep
     room = db.get(Room, room_id)
     if not room or not room.is_active:
         raise HTTPException(status_code=404, detail="Xona topilmadi.")
-    occupants = db.scalar(select(func.count(Resident.id)).where(Resident.room_id == room.id, Resident.is_archived.is_(False))) or 0
+    occupants = db.scalar(select(func.count(ResidencePeriod.id)).where(ResidencePeriod.room_id == room.id, ResidencePeriod.status.in_(("ACTIVE", "PLANNED")))) or 0
+    if not occupants:
+        occupants = db.scalar(select(func.count(Resident.id)).where(Resident.room_id == room.id, Resident.is_archived.is_(False))) or 0
     if occupants:
         raise HTTPException(status_code=409, detail="Yashovchilari bor xonani arxivlashdan oldin ularni boshqa xonaga o‘tkazing.")
     room.is_active = False
@@ -358,7 +378,8 @@ def list_residents(
 
 @router.post("/residents", response_model=ResidentOut, status_code=201)
 def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
-    verify_room_capacity(db, payload.room_id)
+    if payload.room_id:
+        verify_room_capacity(db, payload.room_id, start_date=payload.check_in_date or today_local())
     resident = Resident(
         first_name=payload.first_name.strip(), last_name=payload.last_name.strip(),
         phone=payload.phone.strip() if payload.phone else None,
@@ -369,6 +390,8 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), acto
     )
     db.add(resident)
     db.flush()
+    if payload.room_id:
+        record_room_assignment(db, resident, payload.room_id, payload.check_in_date or today_local(), None, actor)
     start = payload.billing_start or ((payload.check_in_date or today_local()) if payload.payment_period_days and payload.agreed_price else None)
     end = payload.billing_end
     days = payload.payment_period_days
@@ -407,8 +430,12 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
     if billing_keys.intersection(values) and actor.role != "OPERATOR" and not settings.admins_can_adjust_billing:
         raise HTTPException(status_code=403, detail="To‘lov davrini faqat operator o‘zgartira oladi.")
     next_room = values.get("room_id", resident.room_id)
-    if "room_id" in values:
-        verify_room_capacity(db, next_room, resident.id)
+    next_start = values.get("check_in_date", resident.check_in_date)
+    if "room_id" in values or "check_in_date" in values:
+        if next_room:
+            if "check_in_date" not in values and next_room != resident.room_id:
+                next_start = today_local()
+            verify_room_capacity(db, next_room, resident.id, next_start or today_local())
     old_billing = current_period(db, resident.id)
     old_start = old_billing.start_date if old_billing else None
     old_end = old_billing.end_date if old_billing else None
@@ -421,6 +448,11 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
         if key == "telegram_username" and isinstance(value, str):
             value = value.strip().removeprefix("@") or None
         setattr(resident, key, value)
+    if "room_id" in values or "check_in_date" in values:
+        if next_room:
+            record_room_assignment(db, resident, next_room, next_start or today_local(), None, actor)
+        else:
+            close_open_period(db, resident)
     billing_changed = bool(billing_keys.intersection(values))
     if billing_changed:
         start = values.get("billing_start", old_start)
@@ -455,6 +487,12 @@ def archive_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
     if not resident.is_archived:
         resident.is_archived = True
         resident.archived_at = datetime.now(UTC)
+        close_open_period(db, resident, resident.archived_at)
+        if settings.file_retention_days:
+            application_ids = select(StudentApplication.id).where(StudentApplication.resident_id == resident.id)
+            attachments = db.scalars(select(ApplicationFile).where(ApplicationFile.application_id.in_(application_ids), ApplicationFile.deleted_at.is_(None))).all()
+            for attachment in attachments:
+                attachment.delete_after = resident.archived_at + timedelta(days=settings.file_retention_days)
         audit(db, actor, "RESIDENT_ARCHIVED", "Resident", resident.id)
         db.commit()
     return resident_out(db, resident)
@@ -465,9 +503,11 @@ def restore_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
-    verify_room_capacity(db, resident.room_id, resident.id)
+    verify_room_capacity(db, resident.room_id, resident.id, today_local())
     resident.is_archived = False
     resident.archived_at = None
+    if resident.room_id:
+        record_room_assignment(db, resident, resident.room_id, today_local(), None, actor)
     audit(db, actor, "RESIDENT_RESTORED", "Resident", resident.id)
     db.commit()
     ensure_due_periods(db, [resident], actor)
