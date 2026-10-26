@@ -6,9 +6,11 @@ from PIL import Image
 from sqlalchemy import func, select
 
 from app.config import settings
+from app.file_storage import storage
 from app.models import (
     AdmissionInvitation,
     ApplicationFile,
+    ApplicationFileBlob,
     ApplicationStatusEvent,
     AuditEvent,
     BillingPeriod,
@@ -258,6 +260,38 @@ def test_private_application_files_require_staff_auth_and_audit_metadata_only(cl
     audit_details = [str(row.details) for row in database.scalars(select(AuditEvent)).all()]
     assert all(public_session["csrf_token"] not in value for value in audit_details)
     assert all("valid image bytes" not in value for value in audit_details)
+
+
+def test_production_file_storage_uses_postgres_and_supports_staff_download_and_delete(client, database, operator_token, admin_token, monkeypatch):
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "file_storage_backend", "local")
+    assert storage.backend == "postgres"
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "file_storage_backend", "postgres")
+    monkeypatch.setattr(settings, "file_retention_days", 365)
+    _, _, _, _, public_session = _workflow(client, operator_token, admin_token)
+    _fill_application(client, public_session)
+
+    settings_response = client.get("/api/admissions/settings", headers=_headers(admin_token))
+    assert settings_response.status_code == 200
+    assert settings_response.json()["storage_backend"] == "postgres"
+    assert settings_response.json()["uploads_enabled"] is True
+
+    application = database.scalar(select(StudentApplication))
+    attachment = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id))
+    blob = database.get(ApplicationFileBlob, attachment.object_key)
+    assert blob is not None and blob.content.startswith(b"\x89PNG")
+    public_files = client.get("/api/public/application/files")
+    assert public_files.status_code == 200
+    assert all("content" not in row and "ocr_text" not in row for row in public_files.json())
+
+    downloaded = client.get(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=_headers(admin_token))
+    assert downloaded.status_code == 200
+    assert downloaded.content.startswith(b"\x89PNG")
+
+    removed = client.delete(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=_headers(admin_token))
+    assert removed.status_code == 204
+    assert database.get(ApplicationFileBlob, attachment.object_key) is None
 
 
 def test_room_stay_intervals_reject_overlapping_approvals(client, operator_token, admin_token, tmp_path, monkeypatch):

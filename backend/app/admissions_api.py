@@ -703,7 +703,7 @@ def admission_settings(user: User = Depends(get_current_user)) -> dict[str, int 
     _require_staff(user)
     storage_ready = storage.configured()
     return {
-        "storage_backend": settings.file_storage_backend,
+        "storage_backend": storage.backend,
         "storage_configured": storage_ready,
         "retention_days": settings.file_retention_days,
         "uploads_enabled": storage_ready and (settings.environment != "production" or settings.file_retention_days is not None),
@@ -720,11 +720,20 @@ def download_application_file(application_id: UUID, file_id: UUID, db: Session =
         raise HTTPException(status_code=404, detail="Fayl topilmadi.")
     audit(db, user, "APPLICATION_FILE_DOWNLOADED", "ApplicationFile", attachment.id, {"kind": attachment.kind, "document_type": attachment.document_type})
     db.commit()
-    if settings.file_storage_backend.lower() == "s3":
+    if storage.backend == "s3":
         try:
             return RedirectResponse(storage.signed_download_url(attachment.object_key), status_code=302)
         except Exception:
             raise HTTPException(status_code=503, detail="Fayl omboriga ulanib bo‘lmadi.") from None
+    if storage.backend == "postgres":
+        content = storage.read(attachment.object_key, db)
+        if content is None:
+            raise HTTPException(status_code=404, detail="Fayl topilmadi.")
+        return Response(
+            content=content,
+            media_type=attachment.content_type,
+            headers={"Content-Disposition": f'attachment; filename="{attachment.original_name}"'},
+        )
     path = storage.local_path(attachment.object_key)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Fayl topilmadi.")
@@ -734,7 +743,7 @@ def download_application_file(application_id: UUID, file_id: UUID, db: Session =
 @staff_router.get("/admissions/applications/{application_id}/files/{file_id}/signed-url")
 def signed_application_file_url(application_id: UUID, file_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, str]:
     _require_staff(user)
-    if settings.file_storage_backend.lower() != "s3" or not storage.configured():
+    if storage.backend != "s3" or not storage.configured():
         raise HTTPException(status_code=409, detail="Imzolangan havola faqat sozlangan S3 omborida mavjud.")
     attachment = db.scalar(select(ApplicationFile).where(ApplicationFile.id == file_id, ApplicationFile.application_id == application_id, ApplicationFile.deleted_at.is_(None)))
     if not attachment:
@@ -754,7 +763,7 @@ def delete_application_file(application_id: UUID, file_id: UUID, db: Session = D
     if not attachment:
         raise HTTPException(status_code=404, detail="Fayl topilmadi.")
     audit(db, user, "APPLICATION_FILE_DELETED", "ApplicationFile", attachment.id, {"kind": attachment.kind, "document_type": attachment.document_type})
-    storage.delete(attachment.object_key)
+    storage.delete(attachment.object_key, db=db)
     attachment.deleted_at = utcnow()
     attachment.ocr_text = None
     attachment.ocr_status = "DELETED"
@@ -878,7 +887,6 @@ async def upload_public_file(
     if existing_count >= 10 and not previous_files:
         raise HTTPException(status_code=409, detail="Arizaga maksimum 10 ta fayl biriktirish mumkin.")
     try:
-        storage.put(object_key, content, content_type)
         replaced_at = utcnow()
         for previous in previous_files:
             previous.deleted_at = replaced_at
@@ -905,6 +913,10 @@ async def upload_public_file(
         )
         db.add(row)
         db.flush()
+        storage.put(object_key, content, content_type, db=db)
+        if storage.backend == "postgres":
+            for previous in previous_files:
+                storage.delete(previous.object_key, db=db)
         audit(db, None, "APPLICATION_FILE_UPLOADED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
         if previous_files:
             audit(db, None, "APPLICATION_FILE_REPLACED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
@@ -912,17 +924,19 @@ async def upload_public_file(
         db.refresh(row)
     except Exception:
         db.rollback()
-        try:
-            storage.delete(object_key)
-        except Exception:
-            pass
+        if storage.backend != "postgres":
+            try:
+                storage.delete(object_key, db=db)
+            except Exception:
+                pass
         raise
-    for previous in previous_files:
-        try:
-            storage.delete(previous.object_key)
-        except Exception:
-            # The replacement row is committed; the scheduled purge retries the old private object.
-            continue
+    if storage.backend != "postgres":
+        for previous in previous_files:
+            try:
+                storage.delete(previous.object_key, db=db)
+            except Exception:
+                # The replacement row is committed; the scheduled purge retries the old private object.
+                continue
     return ApplicationFileOut.model_validate(row)
 
 

@@ -7,8 +7,11 @@ from uuid import UUID
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.models import ApplicationFileBlob
 
 ALLOWED_TYPES = {
     "application/pdf": (".pdf",),
@@ -58,12 +61,20 @@ def validate_upload(upload: UploadFile, content: bytes) -> tuple[str, str]:
 
 
 class PrivateFileStorage:
-    def __init__(self) -> None:
-        self.backend = settings.file_storage_backend.lower()
+    @property
+    def backend(self) -> str:
+        configured_backend = settings.file_storage_backend.strip().lower()
+        # Production defaults to durable PostgreSQL storage when an external
+        # object store has not been configured. Railway already provisions the DB.
+        if configured_backend == "local" and settings.environment.lower() == "production":
+            return "postgres"
+        return configured_backend
 
     def configured(self) -> bool:
         if self.backend == "local":
             return settings.environment != "production"
+        if self.backend == "postgres":
+            return True
         return self.backend == "s3" and all((settings.s3_bucket, settings.s3_access_key_id, settings.s3_secret_access_key))
 
     def _s3(self):
@@ -79,7 +90,7 @@ class PrivateFileStorage:
             aws_secret_access_key=settings.s3_secret_access_key,
         )
 
-    def put(self, object_key: str, content: bytes, content_type: str) -> None:
+    def put(self, object_key: str, content: bytes, content_type: str, db: Session | None = None) -> None:
         if self.backend == "s3":
             self._s3().put_object(
                 Bucket=settings.s3_bucket,
@@ -90,6 +101,11 @@ class PrivateFileStorage:
                 ContentDisposition="attachment",
                 ServerSideEncryption="AES256",
             )
+            return
+        if self.backend == "postgres":
+            if db is None:
+                raise RuntimeError("PostgreSQL file storage requires a database session")
+            db.add(ApplicationFileBlob(object_key=object_key, content=content))
             return
         if settings.environment == "production":
             raise RuntimeError("Local file storage is disabled in production")
@@ -118,9 +134,20 @@ class PrivateFileStorage:
             ExpiresIn=300,
         )
 
-    def delete(self, object_key: str) -> None:
+    def read(self, object_key: str, db: Session) -> bytes | None:
+        if self.backend != "postgres":
+            raise RuntimeError("Database reads are available only for PostgreSQL storage")
+        blob = db.get(ApplicationFileBlob, object_key)
+        return blob.content if blob else None
+
+    def delete(self, object_key: str, db: Session | None = None) -> None:
         if self.backend == "s3":
             self._s3().delete_object(Bucket=settings.s3_bucket, Key=object_key)
+            return
+        if self.backend == "postgres":
+            if db is None:
+                raise RuntimeError("PostgreSQL file storage requires a database session")
+            db.execute(delete(ApplicationFileBlob).where(ApplicationFileBlob.object_key == object_key))
             return
         path = self._local_path(object_key)
         if path.exists():

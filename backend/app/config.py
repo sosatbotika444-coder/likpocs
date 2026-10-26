@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     admins_can_adjust_billing: bool = False
     file_storage_backend: str = "local"
     file_local_directory: str = "./private-files"
-    file_retention_days: int | None = Field(default=None, ge=1, le=36500)
+    # Safe operational default; deployments can replace this with the approved policy.
+    file_retention_days: int | None = Field(default=365, ge=1, le=36500)
     file_max_bytes: int = Field(default=10_485_760, ge=1024, le=104_857_600)
     file_max_image_pixels: int = Field(default=24_000_000, ge=1_000_000, le=100_000_000)
     public_app_url: str = "https://dormflows.netlify.app"

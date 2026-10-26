@@ -22,6 +22,8 @@ export default defineRailway(() => {
       TIMEZONE: 'Asia/Tashkent',
       CORS_ORIGINS: '',
       PUBLIC_APP_URL: 'https://dormflows.netlify.app',
+      FILE_STORAGE_BACKEND: 'postgres',
+      FILE_RETENTION_DAYS: '365',
       OCR_ENABLED: 'true',
       OCR_LANGUAGES: 'uzb+uzb_cyrl+eng+rus',
       JWT_SECRET: process.env.DORMFLOW_RAILWAY_JWT_SECRET || preserve(),

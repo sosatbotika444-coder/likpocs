@@ -26,8 +26,9 @@ def purge_expired_files(batch_size: int = 100) -> tuple[int, int]:
         ).all()
         for file_id, object_key in rows:
             try:
-                storage.delete(object_key)
+                storage.delete(object_key, db=db)
             except Exception:
+                db.rollback()
                 failed += 1
                 continue
             attachment = db.get(ApplicationFile, file_id)

@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -373,6 +373,20 @@ class ApplicationFile(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     application: Mapped[StudentApplication] = relationship(back_populates="files")
+
+
+class ApplicationFileBlob(Base):
+    """Private uploaded file bytes stored in PostgreSQL for the current deployment."""
+
+    __tablename__ = "application_file_blobs"
+
+    object_key: Mapped[str] = mapped_column(
+        String(500),
+        ForeignKey("application_files.object_key", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ResidencePeriod(Base):

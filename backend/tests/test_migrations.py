@@ -26,6 +26,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     current = load_revision(root / "alembic" / "versions" / "16f28cfa0755_admission_and_residency_workflow.py")
     financial = load_revision(root / "alembic" / "versions" / "20261026_01_financial_controls_and_expenses.py")
     ocr = load_revision(root / "alembic" / "versions" / "20261026_02_application_file_ocr.py")
+    file_blobs = load_revision(root / "alembic" / "versions" / "20261026_03_postgres_application_file_blobs.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
     application_id, application_file_id = uuid4(), uuid4()
@@ -68,8 +69,10 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         financial.upgrade()
         ocr.op = ops
         ocr.upgrade()
+        file_blobs.op = ops
+        file_blobs.upgrade()
         inspector = inspect(connection)
-        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
+        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
         assert expected <= set(inspector.get_table_names())
         assert {"ocr_status", "ocr_text", "ocr_truncated"} <= {column["name"] for column in inspector.get_columns("application_files")}
         ocr_backfill = connection.exec_driver_sql(
@@ -86,6 +89,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        file_blobs.downgrade()
         ocr.downgrade()
         financial.downgrade()
         current.downgrade()
