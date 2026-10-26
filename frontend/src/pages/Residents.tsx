@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Table, Tag, Typography, notification } from 'antd';
 import { EditOutlined, EyeOutlined, SwapOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useSearchParams } from 'react-router-dom';
 import { api, errorMessage } from '../api';
 import type { BillingPeriod, Page, Payment, Resident, ResidentDetail, Room, SystemSettings } from '../types';
 import { formatDate, formatMoney, statusLabel } from '../locales/uz';
@@ -38,6 +39,7 @@ export default function Residents() {
   const [residentPayments, setResidentPayments] = useState<Payment[]>([]);
   const [extension, setExtension] = useState<Resident | null>(null);
   const [extensionForm] = Form.useForm();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const load = async () => {
     setLoading(true); setError('');
@@ -82,12 +84,21 @@ export default function Residents() {
     finally { setSaving(false); }
   };
 
-  const showDetail = async (person: Resident) => {
+  const showDetail = async (person: Resident | string) => {
+    const residentId = typeof person === 'string' ? person : person.id;
     try {
-      const [r, p] = await Promise.all([api.get<ResidentDetail>(`/residents/${person.id}`), api.get<Payment[]>(`/residents/${person.id}/payments`)]);
+      const [r, p] = await Promise.all([api.get<ResidentDetail>(`/residents/${residentId}`), api.get<Payment[]>(`/residents/${residentId}/payments`)]);
       setDetail(r.data); setResidentPayments(p.data);
     } catch (e) { notice.error({ message: 'Yashovchi ma’lumotlarini yuklab bo‘lmadi', description: errorMessage(e) }); }
   };
+  useEffect(() => {
+    const residentId = searchParams.get('resident_id');
+    if (!residentId || loading) return;
+    void showDetail(residentId);
+    const next = new URLSearchParams(searchParams);
+    next.delete('resident_id');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, loading, rows]);
 
   const archive = async (person: Resident) => {
     try { await api.post(`/residents/${person.id}/archive`); notice.success({ message: 'Yashovchi arxivlandi.' }); await load(); }
@@ -107,7 +118,7 @@ export default function Residents() {
   };
 
   const columns = [
-    { title: 'Yashovchi', dataIndex: 'first_name', sorter: (a: Resident, b: Resident) => a.last_name.localeCompare(b.last_name), render: (_: string, r: Resident) => <div className="resident-cell"><span className="person-avatar">{r.first_name[0]}{r.last_name[0]}</span><span><strong>{r.first_name} {r.last_name}</strong><small>{r.phone || r.telegram_username && `@${r.telegram_username}` || 'Aloqa ma’lumoti yo‘q'}</small></span></div> },
+    { title: 'Yashovchi', dataIndex: 'first_name', sorter: (a: Resident, b: Resident) => a.last_name.localeCompare(b.last_name), render: (_: string, r: Resident) => <div className="resident-cell"><span className="person-avatar">{r.first_name[0]}{r.last_name[0]}</span><span><strong><Button type="link" className="resident-name-link" onClick={() => void showDetail(r)}>{r.first_name} {r.last_name}</Button></strong><small>{r.phone || r.telegram_username && `@${r.telegram_username}` || 'Aloqa ma’lumoti yo‘q'}</small></span></div> },
     { title: 'Xona', dataIndex: 'room_number', render: (v: string | null) => v ? <span className="room-pill">{v}</span> : <Text type="secondary">Tayinlanmagan</Text> },
     { title: 'To‘lov holati', dataIndex: 'billing_status', render: (v: string) => statusTag(v) },
     { title: 'Muddat', dataIndex: 'billing_end', render: (v: string | null) => formatDate(v) },

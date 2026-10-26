@@ -33,5 +33,39 @@ export default defineRailway(() => {
     },
   });
 
-  return project('DormFlow', { resources: [api, db] });
+  const dailyJobs = service('dormflow-daily-jobs', {
+    source: github(repo, { branch: 'main', rootDirectory: 'backend' }),
+    deploy: {
+      startCommand: 'python -m app.scheduled_jobs',
+      cronSchedule: '0 0 * * *',
+      restartPolicyType: 'ON_FAILURE',
+      restartPolicyMaxRetries: 2,
+    },
+    env: {
+      DATABASE_URL: db.env.DATABASE_URL,
+      ENVIRONMENT: 'production',
+      TIMEZONE: 'Asia/Tashkent',
+      FILE_STORAGE_BACKEND: 'postgres',
+      FILE_RETENTION_DAYS: '365',
+    },
+  });
+
+  const fileCleanup = service('dormflow-file-cleanup', {
+    source: github(repo, { branch: 'main', rootDirectory: 'backend' }),
+    deploy: {
+      startCommand: 'python -m app.purge_expired_files --batch-size 100',
+      cronSchedule: '30 0 * * *',
+      restartPolicyType: 'ON_FAILURE',
+      restartPolicyMaxRetries: 2,
+    },
+    env: {
+      DATABASE_URL: db.env.DATABASE_URL,
+      ENVIRONMENT: 'production',
+      TIMEZONE: 'Asia/Tashkent',
+      FILE_STORAGE_BACKEND: 'postgres',
+      FILE_RETENTION_DAYS: '365',
+    },
+  });
+
+  return project('DormFlow', { resources: [api, dailyJobs, fileCleanup, db] });
 });

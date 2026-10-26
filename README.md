@@ -78,13 +78,15 @@ Authorization is checked by the API. Hiding a button in the browser is not the a
 
 ## Admissions and room assignment
 
-Operators create dormitories and admission campaigns. Administrators and operators can issue limited invitations, review applications, request missing information, inspect uploaded files, and approve a room stay. Approval creates or links a resident and records a dated residence period; it does not create a billing period or payment.
+Operators create dormitories and admission campaigns. Administrators and operators can issue limited invitations, review applications, request missing information, inspect uploaded files, and approve a room stay. Approval creates or links a resident, records the dated residence period, and opens the first billing period using the existing resident's terms or the selected room's per-bed price and the configured default period. Set each room's price in **Xonalar** for tariff selection to be automatic; an operator can enter an agreed tariff in the approval form when needed. If a linked resident already has an open billing period, approval keeps it and does not create a duplicate charge.
+
+The **Statistika** tab in **Qabul va arizalar** shows application counts, open charges, remaining balances, and payments received from residents linked to approved applications. Approval creates an amount due, not a cash receipt. Actual income appears only after staff records a payment in **To‘lovlar**; recorded costs and net cash flow for the whole hostel appear in **Boshqaruv paneli** and **Xarajatlar**. Payment provider callbacks are not configured.
 
 Applicants open the invitation at `/apply`. The link secret is carried in the URL fragment and removed before the page exchanges it for a short-lived, HTTP-only session. After the first submission, the applicant receives a one-time access code for later status checks and clarification requests. Only a hash of that code is stored. Staff can issue a replacement after manually checking identity.
 
 Development uses the private `private-files/` directory. Production uses a private PostgreSQL blob table by default, so uploads work without a separate S3 account and survive API restarts. Set `FILE_STORAGE_BACKEND=s3` with a private S3-compatible bucket and credentials when a separate object store is available. `FILE_RETENTION_DAYS` defaults to 365 days and should be set to the organization's approved period. Database backups also contain uploaded documents; keep them private and encrypted. The backend Docker image includes local Tesseract OCR with Uzbek Latin/Cyrillic, English, and Russian models. It extracts text from documents for staff review only; OCR text is never returned by public endpoints, never approves an application, and is cleared when the source file is deleted or purged. OCR work is bounded by page, time, and pixel limits. Face recognition is not used. Antivirus scanning is still not connected, so the admissions screen reports that honestly and staff must inspect the original file.
 
-Files scheduled for deletion are purged in bounded batches. Configure a platform scheduler to run this from the backend service at an appropriate interval:
+Files scheduled for deletion are purged in bounded batches. The Railway IaC declares a daily cleanup job at 05:30 Tashkent time; other hosting platforms need an equivalent scheduler:
 
 ```powershell
 python -m app.purge_expired_files --batch-size 100
@@ -96,13 +98,13 @@ The purge command logs only aggregate counts. Files in abandoned drafts expire a
 
 The Uzbek-language **Xarajatlar** screen records dated expenses with a category, payment method, amount, and receipt/reference. Posted entries are never deleted; an operator can void one with a required reason, and both the record and audit trail remain available. Payment and expense writes accept an `Idempotency-Key`; the browser keeps the same key when retrying an unchanged request.
 
-Billing rollover and due reminders run as a daily backend job. Configure the hosting platform's scheduler to run this from the backend service after applying the current Alembic migrations:
+Billing rollover and due reminders run as a daily backend job. The Railway IaC declares it for 05:00 Tashkent time, after the database migrations are in place; other hosting platforms need an equivalent scheduler:
 
 ```powershell
 python -m app.scheduled_jobs
 ```
 
-The command creates due billing periods and per-user reminder rows in one database transaction. Schedule it once daily; rerunning the same day is safe. GET requests do not create billing periods or notifications.
+The command creates due billing periods and per-user reminder rows in one database transaction. The schedules take effect when the Railway IaC is applied; they run at 00:00 and 00:30 UTC (05:00 and 05:30 in Tashkent). Rerunning a billing job is safe. GET requests do not create billing periods or notifications. A paid cycle rolls forward on this job; do not rely on page visits to generate charges.
 
 Authorized users can export resident, room, payment, expense, debt, overdue, and revenue reports to UTF-8 CSV, XLSX, and PDF. Revenue reports accept a custom date range and day/week/month grouping. Spreadsheet exports neutralize formula-like text in cells. The optional command `python -m app.seed --demo` creates three sample rooms only; demo residents, payments, and expenses are never inserted.
 

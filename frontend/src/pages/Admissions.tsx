@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import dayjs, { type Dayjs } from 'dayjs';
-import { Alert, Button, Checkbox, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Progress, Select, Space, Spin, Steps, Table, Tabs, Tag, Typography, notification } from 'antd';
+import { Alert, Button, Checkbox, Col, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Progress, Row, Select, Space, Spin, Steps, Table, Tabs, Tag, Typography, notification } from 'antd';
 import { CopyOutlined, DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { api, errorMessage } from '../api';
-import { formatDate } from '../locales/uz';
+import { formatDate, formatMoney } from '../locales/uz';
 import { useAuth } from '../auth';
-import type { AdmissionSettings, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicApplicationFile, PublicCampaign, Room } from '../types';
+import type { AdmissionSettings, AdmissionSummary, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicApplicationFile, PublicCampaign, Room } from '../types';
 import { Actions, EmptyBlock, PageHeading, Panel } from './shared';
 
 const { Text } = Typography;
@@ -33,6 +34,10 @@ const publicDateFields = ['birth_date', 'study_start', 'study_end', 'requested_m
 function statusTag(status: string) {
   const color = status === 'APPROVED' ? 'green' : status === 'REJECTED' ? 'red' : status === 'NEEDS_INFO' ? 'orange' : status === 'IN_REVIEW' ? 'blue' : 'default';
   return <Tag color={color}>{statusLabels[status] || status}</Tag>;
+}
+
+function AdmissionMetric({ label, value, note, tone = '' }: { label: string; value: string | number; note?: string; tone?: string }) {
+  return <div className={`metric-card ${tone}`}><span>{label}</span><strong>{value}</strong>{note && <small>{note}</small>}</div>;
 }
 
 function PublicIntake() {
@@ -220,6 +225,7 @@ type CampaignFormValues = { name: string; dormitory_id: string; document_types: 
 
 function StaffAdmissions() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [notice, holder] = notification.useNotification();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
@@ -228,6 +234,7 @@ function StaffAdmissions() {
   const [queue, setQueue] = useState<ApplicationQueueItem[]>([]);
   const [total, setTotal] = useState(0);
   const [settings, setSettings] = useState<AdmissionSettings | null>(null);
+  const [summary, setSummary] = useState<AdmissionSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -235,7 +242,7 @@ function StaffAdmissions() {
   const [campaignFilter, setCampaignFilter] = useState<string | undefined>();
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState<Application | null>(null);
-  const [duplicates, setDuplicates] = useState<{id:string;first_name:string;last_name:string;phone:string|null;room_number:string|null}[]>([]);
+  const [duplicates, setDuplicates] = useState<{id:string;first_name:string;last_name:string;phone:string|null;room_number:string|null;agreed_price:number|null;payment_period_days:number|null}[]>([]);
   const [busy, setBusy] = useState(false);
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -247,16 +254,18 @@ function StaffAdmissions() {
   const [inviteForm] = Form.useForm<Record<string, unknown>>();
   const [dormForm] = Form.useForm<{name:string;address?:string}>();
   const [actionForm] = Form.useForm<Record<string, unknown>>();
+  const selectedResidentId = Form.useWatch('resident_id', actionForm);
 
   const loadLists = async () => {
     setLoading(true);
     try {
-      const [campaignResult, invitationResult, dormResult, roomResult, settingsResult, queueResult] = await Promise.all([
+      const [campaignResult, invitationResult, dormResult, roomResult, settingsResult, queueResult, summaryResult] = await Promise.all([
         api.get<Campaign[]>('/admissions/campaigns'), api.get<Invitation[]>('/admissions/invitations'), api.get<Dormitory[]>('/dormitories', { params: { include_inactive: user?.role === 'OPERATOR' } }),
         api.get<Page<Room>>('/rooms', { params: { limit: 500 } }), api.get<AdmissionSettings>('/admissions/settings'),
         api.get<Page<ApplicationQueueItem>>('/admissions/applications', { params: { status, campaign_id: campaignFilter, q: query || undefined, skip: (page - 1) * 20, limit: 20 } }),
+        api.get<AdmissionSummary>('/admissions/summary'),
       ]);
-      setCampaigns(campaignResult.data); setInvitations(invitationResult.data); setDormitories(dormResult.data); setRooms(roomResult.data.items); setSettings(settingsResult.data); setQueue(queueResult.data.items); setTotal(queueResult.data.total);
+      setCampaigns(campaignResult.data); setInvitations(invitationResult.data); setDormitories(dormResult.data); setRooms(roomResult.data.items); setSettings(settingsResult.data); setQueue(queueResult.data.items); setTotal(queueResult.data.total); setSummary(summaryResult.data);
     } catch (error) { notice.error({ message: 'Qabul ma’lumotlari yuklanmadi', description: errorMessage(error) }); }
     finally { setLoading(false); }
   };
@@ -309,7 +318,11 @@ function StaffAdmissions() {
     try {
       if (actionKind === 'info') await api.post(`/admissions/applications/${detail.id}/request-info`, { reason: values.reason, fields: values.fields });
       if (actionKind === 'reject') await api.post(`/admissions/applications/${detail.id}/reject`, { reason: values.reason });
-      if (actionKind === 'approve') await api.post(`/admissions/applications/${detail.id}/approve`, { reason: values.reason, room_id: values.room_id, move_in: isoDate(values.move_in as Dayjs) as string, move_out: isoDate(values.move_out as Dayjs), resident_id: values.resident_id || null });
+      if (actionKind === 'approve') await api.post(`/admissions/applications/${detail.id}/approve`, {
+        reason: values.reason, room_id: values.room_id, move_in: isoDate(values.move_in as Dayjs) as string,
+        move_out: isoDate(values.move_out as Dayjs), resident_id: values.resident_id || null,
+        ...(values.resident_id ? {} : user?.role === 'OPERATOR' || settings?.billing_change_allowed ? { agreed_price: values.agreed_price, payment_period_days: values.payment_period_days } : {}),
+      });
       setActionKind(null); actionForm.resetFields(); await refreshDetail(); notice.success({message:'Ariza yangilandi.'});
     } catch (error) { notice.error({message:'Amal bajarilmadi',description:errorMessage(error)}); }
     finally { setBusy(false); }
@@ -362,18 +375,47 @@ function StaffAdmissions() {
   ];
   const appDormiRooms = rooms.filter((room)=>room.dormitory_id===detail?.dormitory_id && room.is_active);
   const canDecide = detail && ['SUBMITTED','IN_REVIEW','NEEDS_INFO'].includes(detail.status);
+  const statusSummary = [
+    ['Yuborildi', summary?.by_status.SUBMITTED || 0],
+    ['Tekshiruvda', summary?.by_status.IN_REVIEW || 0],
+    ['Aniqlik kerak', summary?.by_status.NEEDS_INFO || 0],
+    ['Tasdiqlandi', summary?.by_status.APPROVED || 0],
+    ['Rad etildi', summary?.by_status.REJECTED || 0],
+    ['Qoralama', summary?.by_status.DRAFT || 0],
+    ['Bekor qilindi', summary?.by_status.CANCELLED || 0],
+    ['Arxivlandi', summary?.by_status.ARCHIVED || 0],
+  ];
+  const statisticsPanel = summary ? <div className="page-stack">
+    <Text type="secondary">Moliyaviy summalar ariza orqali qo‘shilgan yashovchilarga tegishli. Umumiy hostel daromadi va xarajatlari Boshqaruv panelida ko‘rsatiladi.</Text>
+    <Row gutter={[14, 14]}>
+      <Col xs={12} md={6}><AdmissionMetric label="Jami yuborilgan ariza" value={summary.total_applications} note={`${summary.applications_this_month} tasi shu oy`} /></Col>
+      <Col xs={12} md={6}><AdmissionMetric label="Ko‘rib chiqilmoqda" value={summary.pending_applications} note="Yuborildi, tekshiruvda yoki aniqlik kerak" tone="metric-amber" /></Col>
+      <Col xs={12} md={6}><AdmissionMetric label="Shu oy tasdiqlandi" value={summary.approved_this_month} note={`${summary.approved_applications} ta jami tasdiqlangan`} tone="metric-green" /></Col>
+      <Col xs={12} md={6}><AdmissionMetric label="Yashovchilar bilan bog‘landi" value={summary.linked_residents} note="Tasdiqlangan arizalardan" /></Col>
+    </Row>
+    <Row gutter={[14, 14]}>
+      <Col xs={24} md={8}><AdmissionMetric label="Kutilayotgan hisob" value={formatMoney(summary.expected_payments)} note="Ochiq to‘lov davrlari summasi" tone="metric-blue" /></Col>
+      <Col xs={24} md={8}><AdmissionMetric label="Qarzdorlik" value={formatMoney(summary.outstanding_debt)} note="Ochiq davrlardagi qoldiq" tone="metric-amber" /></Col>
+      <Col xs={24} md={8}><AdmissionMetric label="Shu oy haqiqiy tushum" value={formatMoney(summary.actual_revenue_this_month)} note="Faqat qayd etilgan to‘lovlar" tone="metric-green" /></Col>
+    </Row>
+    <Panel title="Arizalar holati bo‘yicha">
+      <div className="finance-list">{statusSummary.map(([label, count])=><div key={label}><span>{label}</span><strong>{count}</strong></div>)}</div>
+      <p className="dashboard-footnote">Tasdiqlash yashovchini ro‘yxatga qo‘shadi va belgilangan tarif bo‘yicha hisob ochadi. Pul kelib tushgani faqat «To‘lovlar» bo‘limida qayd qilinganda tushumga qo‘shiladi. Xarajatlar «Boshqaruv paneli» va «Xarajatlar» bo‘limida yuritiladi.</p>
+    </Panel>
+  </div> : <div className="page-loading"><Spin/></div>;
 
   return <div className="page-stack">{holder}
     <PageHeading eyebrow="TALABALAR BILAN ISHLASH" title="Qabul va arizalar" subtitle="Takliflar, arizalar va joylashtirishni bitta navbatda boshqaring." action="Taklif yaratish" onAction={()=>{inviteForm.setFieldsValue({max_submissions:25});setInviteOpen(true);}}/>
     {settings && <div className="admission-status-strip"><span>Fayl ombori: <strong>{settings.storage_configured?'tayyor':'sozlanmagan'}</strong></span><span>Saqlash muddati: <strong>{settings.retention_days ? `${settings.retention_days} kun` : 'belgilanmagan'}</strong></span><span>OCR: <strong>{settings.ocr_configured?'tayyor':'sozlanmagan'}</strong></span><span>Antivirus: <strong>{settings.antivirus_configured?'tayyor':'sozlanmagan'}</strong></span></div>}
-    {!settings?.uploads_enabled && <Alert type="warning" showIcon message="Fayl yuklash sozlamalarini tekshiring" description="Development muhitida yopiq lokal ombor ishlaydi. Production yuklamalari uchun xususiy S3 ombori va tashkilot tasdiqlagan saqlash muddati kerak."/>}
+    {!settings?.uploads_enabled && <Alert type="warning" showIcon message="Fayl yuklash sozlamalarini tekshiring" description="Yuklash uchun xususiy fayl ombori va saqlash muddati sozlangan bo‘lishi kerak."/>}
     <Tabs items={[
+      {key:'statistics',label:'Statistika',children:statisticsPanel},
       {key:'applications',label:`Arizalar · ${total}`,children:<><div className="toolbar panel"><Input className="search-input" value={search} onChange={(event)=>setSearch(event.target.value)} onPressEnter={()=>{setPage(1);setQuery(search);}} prefix={<SearchOutlined/>} placeholder="Ariza raqami, ism yoki telefon"/><Button onClick={()=>{setPage(1);setQuery(search);}}>Qidirish</Button><Select value={status} onChange={(value)=>{setStatus(value);setPage(1);}} options={[{value:'all',label:'Barcha holatlar'},...Object.entries(statusLabels).map(([value,label])=>({value,label}))]}/><Select allowClear placeholder="Barcha kampaniyalar" value={campaignFilter} onChange={(value)=>{setCampaignFilter(value);setPage(1);}} options={campaigns.map((item)=>({value:item.id,label:item.name}))}/><Button icon={<ReloadOutlined/>} onClick={()=>void loadLists()}/></div><div className="panel table-panel"><Table rowKey="id" loading={loading} dataSource={queue} columns={queueColumns} scroll={{x:780}} pagination={{current:page,pageSize:20,total,onChange:setPage,showTotal:(value)=>`Jami ${value} ta`}} locale={{emptyText:<EmptyBlock title="Hozircha arizalar yo‘q" detail="Yangi takliflar orqali arizalar shu yerda ko‘rinadi."/>}}/></div></>},
       {key:'invitations',label:`Takliflar · ${invitations.length}`,children:<><div className="toolbar panel"><Text type="secondary">Havola tokeni bazada ochiq saqlanmaydi; nusxa faqat yaratilganda ko‘rsatiladi.</Text><Button type="primary" icon={<PlusOutlined/>} onClick={()=>setInviteOpen(true)}>Yangi taklif</Button></div><div className="panel table-panel"><Table rowKey="id" dataSource={invitations} columns={inviteColumns} scroll={{x:760}} pagination={{pageSize:10}} locale={{emptyText:'Takliflar yaratilmagan'}}/></div></>},
       ...(user?.role==='OPERATOR'?[{key:'campaigns',label:`Kampaniyalar · ${campaigns.length}`,children:<><div className="toolbar panel"><Button type="primary" icon={<PlusOutlined/>} onClick={()=>{campaignForm.setFieldsValue({document_types:['ID','STUDY_PROOF'],consent_version:'2026-01',consent_text:'Shaxsiy ma’lumotlarimni qabul arizasini ko‘rib chiqish va joylashtirish maqsadida qayta ishlashga roziman.'});setCampaignOpen(true);}}>Kampaniya yaratish</Button><Button onClick={()=>editDormitory()}>Yotoqxona qo‘shish</Button></div><div className="panel table-panel"><Table rowKey="id" dataSource={campaigns} columns={[{title:'Kampaniya',dataIndex:'name'},{title:'Yotoqxona',render:(_:unknown,row:Campaign)=>dormitories.find((item)=>item.id===row.dormitory_id)?.name||'—'},{title:'Hujjatlar',dataIndex:'document_types',render:(items:string[])=>items.join(', ')||'—'},{title:'Holat',dataIndex:'status',render:(value:string)=><Tag>{value}</Tag>},{title:'',render:(_:unknown,row:Campaign)=><Select size="small" value={row.status} onChange={(value)=>void api.patch(`/admissions/campaigns/${row.id}/status`,null,{params:{status_value:value}}).then(loadLists).catch((error:unknown)=>notice.error({message:errorMessage(error)}))} options={['ACTIVE','PAUSED','CLOSED'].map((value)=>({value,label:value}))}/>}]} pagination={{pageSize:10}} locale={{emptyText:'Kampaniyalar yaratilmagan'}}/></div><Panel title="Yotoqxonalar"><Table rowKey="id" dataSource={dormitories} columns={dormitoryColumns} pagination={{pageSize:8}} locale={{emptyText:'Yotoqxonalar yaratilmagan'}}/></Panel></>}]:[]),
     ]}/>
 
-    <Drawer open={Boolean(detail)} onClose={()=>setDetail(null)} width={Math.min(780,window.innerWidth-20)} title={detail ? `${detail.reference} · ${statusLabels[detail.status]||detail.status}` : ''} extra={detail && <Space>{canDecide && detail.status==='SUBMITTED' && <Button onClick={()=>void api.post(`/admissions/applications/${detail.id}/start-review`).then(refreshDetail).catch((error:unknown)=>notice.error({message:errorMessage(error)}))}>Tekshiruvni boshlash</Button>}{canDecide && <Button type="primary" onClick={()=>{setActionKind('approve');actionForm.setFieldsValue({move_in:detail.requested_move_in?dayjs(detail.requested_move_in):dayjs()});}}>Tasdiqlash</Button>}</Space>}>
+    <Drawer open={Boolean(detail)} onClose={()=>setDetail(null)} width={Math.min(780,window.innerWidth-20)} title={detail ? `${detail.reference} · ${statusLabels[detail.status]||detail.status}` : ''} extra={detail && <Space>{canDecide && detail.status==='SUBMITTED' && <Button onClick={()=>void api.post(`/admissions/applications/${detail.id}/start-review`).then(refreshDetail).catch((error:unknown)=>notice.error({message:errorMessage(error)}))}>Tekshiruvni boshlash</Button>}{canDecide && <Button type="primary" onClick={()=>{actionForm.resetFields();setActionKind('approve');actionForm.setFieldsValue({move_in:detail.requested_move_in?dayjs(detail.requested_move_in):dayjs(),payment_period_days:settings?.default_period_days||30});}}>Tasdiqlash</Button>}{detail.status==='APPROVED'&&detail.resident_id&&<Button onClick={()=>navigate('/residents?resident_id='+detail.resident_id)}>Yashovchini ochish</Button>}</Space>}>
       {detail && <div className="detail-stack admission-detail">{holder}<div>{statusTag(detail.status)} <Text type="secondary">Yuborildi: {formatDate(detail.created_at.slice(0,10),true)}</Text></div><Alert type="info" showIcon message={settings?.ocr_configured?'OCR xodim uchun yordamchi vosita sifatida yoqilgan':'OCR mavjud emas; hujjatni qo‘lda tekshiring'} description="OCR matni faqat xodimga ko‘rinadi. Har bir xulosa asl hujjat bilan solishtiriladi va avtomatik qaror qabul qilinmaydi."/><Descriptions bordered size="small" column={2} items={[
         {key:'name',label:'F.I.Sh. (lotin)',children:`${detail.last_name_latin} ${detail.first_name_latin} ${detail.middle_name_latin}`},{key:'name_cyr',label:'F.I.Sh. (kirill)',children:`${detail.last_name_cyrillic} ${detail.first_name_cyrillic} ${detail.middle_name_cyrillic}`},
         {key:'dob',label:'Tug‘ilgan sana',children:formatDate(detail.birth_date,true)},{key:'phone',label:'Telefon',children:detail.phone},{key:'email',label:'Pochta',children:detail.email||'—'},
@@ -393,10 +435,10 @@ function StaffAdmissions() {
     <Modal open={Boolean(link)} title="Yangi taklif havolasi" onCancel={()=>setLink('')} footer={<Button type="primary" onClick={()=>void copyText(link).then(()=>notice.success({message:'Havola nusxalandi.'}))}>Havolani nusxalash</Button>}><Alert type="warning" showIcon message="Havola faqat shu oynada ko‘rsatiladi. Uni talabaga xavfsiz yuboring."/><Input readOnly value={link} className="link-field"/></Modal>
     <Modal open={campaignOpen} title="Qabul kampaniyasi" onCancel={()=>setCampaignOpen(false)} onOk={()=>campaignForm.submit()} confirmLoading={busy} okText="Yaratish" cancelText="Bekor qilish" width={640} destroyOnClose><Form form={campaignForm} layout="vertical" onFinish={createCampaign}><Form.Item name="name" label="Kampaniya nomi" rules={[{required:true}]}><Input maxLength={160}/></Form.Item><Form.Item name="dormitory_id" label="Yotoqxona" rules={[{required:true}]}><Select options={dormitories.filter((item)=>item.is_active).map((item)=>({value:item.id,label:item.name}))}/></Form.Item><Form.Item name="document_types" label="Talab qilinadigan hujjatlar" rules={[{required:true}]}><Select mode="tags" options={[{value:'ID',label:'Pasport yoki ID'},{value:'STUDY_PROOF',label:'O‘qish joyidan ma’lumotnoma'}]}/></Form.Item><Form.Item name="consent_version" label="Rozilik matni versiyasi" rules={[{required:true}]}><Input maxLength={40}/></Form.Item><Form.Item name="consent_text" label="Rozilik matni" rules={[{required:true}]}><Input.TextArea rows={3}/></Form.Item><Form.List name="custom_fields">{(fields,{add,remove})=><><Text strong>Qo‘shimcha maydonlar</Text>{fields.map(({key,name,...rest})=><div className="custom-field-row" key={key}><Form.Item {...rest} name={[name,'key']} rules={[{required:true}]}><Input placeholder="kalit_lowercase"/></Form.Item><Form.Item {...rest} name={[name,'label']} rules={[{required:true}]}><Input placeholder="Maydon nomi"/></Form.Item><Form.Item {...rest} name={[name,'kind']} rules={[{required:true}]}><Select options={['text','date','select','checkbox'].map((value)=>({value,label:value}))}/></Form.Item><Form.Item {...rest} name={[name,'options']} label="Tanlov variantlari"><Select mode="tags" tokenSeparators={[',']}/></Form.Item><Form.Item {...rest} name={[name,'required']} valuePropName="checked"><Checkbox>Shart</Checkbox></Form.Item><Button danger onClick={()=>remove(name)}>O‘chirish</Button></div>)}<Button icon={<PlusOutlined/>} onClick={()=>add({kind:'text',required:false})}>Maydon qo‘shish</Button></>}</Form.List></Form></Modal>
     <Modal open={dormOpen} title={editingDormitory ? "Yotoqxonani tahrirlash" : "Yangi yotoqxona"} onCancel={()=>setDormOpen(false)} onOk={()=>dormForm.submit()} okText="Saqlash" cancelText="Bekor qilish"><Form form={dormForm} layout="vertical" onFinish={saveDormitory}><Form.Item name="name" label="Nomi" rules={[{required:true}]}><Input maxLength={160}/></Form.Item><Form.Item name="address" label="Manzil"><Input maxLength={500}/></Form.Item></Form></Modal>
-    <Modal open={Boolean(actionKind)} title={actionKind==='info'?'Talabadan aniqlik so‘rash':actionKind==='approve'?'Arizani tasdiqlash':'Arizani rad etish'} onCancel={()=>setActionKind(null)} onOk={()=>actionForm.submit()} confirmLoading={busy} okText="Tasdiqlash" cancelText="Bekor qilish" destroyOnClose>
+    <Modal open={Boolean(actionKind)} title={actionKind==='info'?'Talabadan aniqlik so‘rash':actionKind==='approve'?'Arizani tasdiqlash':'Arizani rad etish'} onCancel={()=>{setActionKind(null);actionForm.resetFields();}} onOk={()=>actionForm.submit()} confirmLoading={busy} okText="Tasdiqlash" cancelText="Bekor qilish" destroyOnClose>
       <Form form={actionForm} layout="vertical" onFinish={runAction}>
         {actionKind==='info'&&<Form.Item name="fields" label="Talaba to‘ldirishi kerak bo‘lgan maydonlar" rules={[{required:true}]}><Select mode="multiple" options={fieldOptions}/></Form.Item>}
-        {actionKind==='approve'&&<><Alert type="info" message="Xona davri tekshiriladi. Bu qaror to‘lov yaratmaydi." className="modal-alert"/><Form.Item name="room_id" label="Xona" rules={[{required:true}]}><Select options={appDormiRooms.map((room)=>({value:room.id,label:`${room.number}-xona · ${room.available_beds} bo‘sh o‘rin`}))}/></Form.Item><Form.Item name="move_in" label="Yashash boshlanishi" rules={[{required:true}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="move_out" label="Yashash tugashi"><DatePicker className="full-width"/></Form.Item>{duplicates.length>0&&<Form.Item name="resident_id" label="Mavjud yashovchi bilan bog‘lash (ixtiyoriy)"><Select allowClear options={duplicates.map((item)=>({value:item.id,label:`${item.last_name} ${item.first_name} · ${item.phone||''}`}))}/></Form.Item>}</>}
+        {actionKind==='approve'&&<><Alert type="info" message="Tasdiqlanganda yashovchi ro‘yxatga qo‘shiladi va birinchi hisob ochiladi. Haqiqiy tushum faqat to‘lov qayd etilganda hisoblanadi." className="modal-alert"/><Form.Item name="room_id" label="Xona" rules={[{required:true}]}><Select onChange={(roomId)=>{const resident=duplicates.find((item)=>item.id===selectedResidentId);const room=appDormiRooms.find((item)=>item.id===roomId);actionForm.setFieldsValue({agreed_price:resident?.agreed_price??room?.price??undefined,payment_period_days:resident?.payment_period_days??actionForm.getFieldValue('payment_period_days')});}} options={appDormiRooms.map((room)=>({value:room.id,label:`${room.number}-xona · ${room.available_beds} bo‘sh o‘rin`}))}/></Form.Item><Form.Item name="move_in" label="Yashash boshlanishi" rules={[{required:true}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="move_out" label="Yashash tugashi"><DatePicker className="full-width"/></Form.Item><Form.Item name="agreed_price" label="Tarif (so‘m / to‘lov davri)" rules={[{required:true,message:"Xona narxini yoki operator belgilagan tarifni kiriting."}]} extra="Xona narxi avtomatik olinadi. Mavjud yashovchi tanlansa, uning amaldagi tarifi saqlanadi."><InputNumber min={0} precision={2} disabled={Boolean(selectedResidentId) || user?.role!=='OPERATOR'&&!settings?.billing_change_allowed} controls={false} className="full-width"/></Form.Item><Form.Item name="payment_period_days" label="To‘lov davri (kun)" rules={[{required:true,message:"To‘lov davrini belgilang."}]}><InputNumber min={1} max={365000} disabled={Boolean(selectedResidentId) || user?.role!=='OPERATOR'&&!settings?.billing_change_allowed} className="full-width"/></Form.Item>{duplicates.length>0&&<Form.Item name="resident_id" label="Mavjud yashovchi bilan bog‘lash (ixtiyoriy)"><Select allowClear onChange={(residentId)=>{const selected=duplicates.find((item)=>item.id===residentId);const room=appDormiRooms.find((item)=>item.id===actionForm.getFieldValue('room_id'));actionForm.setFieldsValue({agreed_price:selected?.agreed_price??room?.price??undefined,payment_period_days:selected?.payment_period_days??settings?.default_period_days??30});}} options={duplicates.map((item)=>({value:item.id,label:`${item.last_name} ${item.first_name} · ${item.phone||''}`}))}/></Form.Item>}</>}
         <Form.Item name="reason" label={actionKind==='info'?'Talabaga ko‘rinadigan izoh':'Qaror uchun asos'} rules={[{required:true,min:3}]}><Input.TextArea rows={3} maxLength={2000}/></Form.Item>
       </Form>
     </Modal>

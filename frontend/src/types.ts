@@ -87,4 +87,10 @@ export type ApplicationQueueItem = {
 };
 export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string };
 export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string };
-export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; uploads_enabled: boolean; ocr_configured: boolean; antivirus_configured: boolean };
+export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ocr_configured: boolean; antivirus_configured: boolean };
+export type AdmissionSummary = {
+  total_applications: number; applications_this_month: number; pending_applications: number;
+  approved_applications: number; approved_this_month: number; rejected_applications: number; linked_residents: number;
+  expected_payments: number; outstanding_debt: number; actual_revenue_this_month: number;
+  by_status: Record<string, number>;
+};

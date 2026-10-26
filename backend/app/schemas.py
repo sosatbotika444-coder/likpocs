@@ -317,6 +317,20 @@ class DashboardOut(BaseModel):
     recent_residents: list[ResidentOut]
 
 
+class AdmissionSummaryOut(BaseModel):
+    total_applications: int
+    applications_this_month: int
+    pending_applications: int
+    approved_applications: int
+    approved_this_month: int
+    rejected_applications: int
+    linked_residents: int
+    expected_payments: Decimal
+    outstanding_debt: Decimal
+    actual_revenue_this_month: Decimal
+    by_status: dict[str, int]
+
+
 class NotificationOut(ORMModel):
     id: UUID
     title: str
@@ -569,6 +583,8 @@ class ApplicationApproveIn(BaseModel):
     move_in: date
     move_out: date | None = None
     resident_id: UUID | None = None
+    agreed_price: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
+    payment_period_days: int | None = Field(default=None, gt=0, le=365000)
 
     @model_validator(mode="after")
     def ordered_stay(self):

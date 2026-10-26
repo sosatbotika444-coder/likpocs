@@ -1,6 +1,8 @@
 import io
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 from sqlalchemy import func, select
@@ -75,7 +77,7 @@ def _fill_application(client, session: dict, *, phone: str = "+998901234567") ->
     assert upload.status_code == 201, upload.text
 
 
-def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+def test_admission_approval_creates_resident_billing_and_updates_statistics(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
     monkeypatch.setattr(settings, "file_retention_days", 30)
     dormitory, _, invitation, raw_invite, public_session = _workflow(client, operator_token, admin_token)
@@ -129,7 +131,7 @@ def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, datab
     final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
     assert final_submit.status_code == 200
 
-    room = client.post("/api/rooms", headers=admin, json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1})
+    room = client.post("/api/rooms", headers=admin, json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1, "price": "300000"})
     assert room.status_code == 201, room.text
     approved = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
         "reason": "Identity and documents checked.",
@@ -142,7 +144,42 @@ def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, datab
     resident = database.get(Resident, UUID(approved.json()["resident_id"]))
     assert resident is not None and resident.room_id is not None
     assert database.scalar(select(func.count(ResidencePeriod.id)).where(ResidencePeriod.resident_id == resident.id)) == 1
-    assert database.scalar(select(func.count(BillingPeriod.id)).where(BillingPeriod.resident_id == resident.id)) == 0
+    assert resident.agreed_price == 300000
+    assert resident.payment_period_days == 30
+    periods = database.scalars(select(BillingPeriod).where(BillingPeriod.resident_id == resident.id)).all()
+    assert len(periods) == 1
+    assert periods[0].charge_amount == 300000
+    assert periods[0].start_date.isoformat() == "2026-11-01"
+    assert periods[0].end_date.isoformat() == "2026-12-01"
+
+    summary_headers = _headers(admin_token)
+    summary = client.get("/api/admissions/summary", headers=summary_headers)
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["approved_applications"] == 1
+    assert summary.json()["linked_residents"] == 1
+    assert Decimal(summary.json()["expected_payments"]) == Decimal("300000.00")
+    assert Decimal(summary.json()["outstanding_debt"]) == Decimal("300000.00")
+    assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("0.00")
+
+    today = datetime.now(ZoneInfo("Asia/Tashkent")).date()
+    recorded_payment = client.post("/api/payments", headers=admin, json={
+        "resident_id": str(resident.id), "amount": "100000", "payment_date": today.isoformat(), "method": "CASH",
+    })
+    assert recorded_payment.status_code == 201, recorded_payment.text
+    summary = client.get("/api/admissions/summary", headers=summary_headers)
+    assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("100000.00")
+    assert Decimal(summary.json()["outstanding_debt"]) == Decimal("200000.00")
+
+    expense = client.post("/api/expenses", headers=admin, json={
+        "expense_date": today.isoformat(), "category": "UTILITIES", "description": "Test utility cost",
+        "amount": "25000", "method": "CASH", "reference": "",
+    })
+    assert expense.status_code == 201, expense.text
+    dashboard = client.get("/api/dashboard", headers=summary_headers)
+    assert dashboard.status_code == 200, dashboard.text
+    assert Decimal(dashboard.json()["actual_revenue"]) == Decimal("100000.00")
+    assert Decimal(dashboard.json()["actual_expenses"]) == Decimal("25000.00")
+    assert Decimal(dashboard.json()["net_cash_flow"]) == Decimal("75000.00")
     repeated_approval = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
         "reason": "Repeated request.", "room_id": room.json()["id"], "move_in": "2026-11-01",
     })
@@ -157,6 +194,45 @@ def test_invitation_uses_public_domain_when_local_setting_is_stale(client, opera
     _, _, invitation, _, _ = _workflow(client, operator_token, admin_token)
     assert invitation["link"].startswith("https://dormflows.netlify.app/apply#")
     assert "https://dormflows.netlify.app" in settings.cors_origin_list
+
+
+def test_approval_links_matching_resident_without_duplicate_billing(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+    dormitory, _, _, _, public_session = _workflow(client, operator_token, admin_token)
+    admin = _headers(admin_token)
+    room = client.post("/api/rooms", headers=admin, json={
+        "number": "303", "dormitory_id": dormitory["id"], "floor": 3, "capacity": 2, "price": "500000",
+    })
+    assert room.status_code == 201, room.text
+    existing = client.post("/api/residents", headers=_headers(operator_token), json={
+        "first_name": "Aziza", "last_name": "Karimova", "phone": "+998901234567",
+        "payment_period_days": 30, "agreed_price": "400000",
+        "billing_start": "2026-11-01", "billing_end": "2026-12-01",
+    })
+    assert existing.status_code == 201, existing.text
+
+    _fill_application(client, public_session)
+    submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    assert submitted.status_code == 200, submitted.text
+    application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
+    assert application is not None
+    duplicates = client.get(f"/api/admissions/applications/{application.id}/duplicates", headers=admin)
+    assert duplicates.status_code == 200, duplicates.text
+    assert duplicates.json()[0]["id"] == existing.json()["id"]
+    assert Decimal(duplicates.json()[0]["agreed_price"]) == Decimal("400000.00")
+    assert duplicates.json()[0]["payment_period_days"] == 30
+
+    approved = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
+        "reason": "Existing record verified.", "room_id": room.json()["id"], "move_in": "2026-11-01",
+        "resident_id": existing.json()["id"],
+    })
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["resident_id"] == existing.json()["id"]
+    resident = database.get(Resident, UUID(existing.json()["id"]))
+    assert resident is not None and resident.room_id == UUID(room.json()["id"])
+    assert resident.agreed_price == 400000
+    assert database.scalar(select(func.count(Resident.id))) == 1
+    assert database.scalar(select(func.count(BillingPeriod.id)).where(BillingPeriod.resident_id == resident.id)) == 1
 
 
 def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client, database, operator_token, admin_token, tmp_path, monkeypatch):
@@ -298,7 +374,7 @@ def test_room_stay_intervals_reject_overlapping_approvals(client, operator_token
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
     dormitory, _, _, invitation_token, first_session = _workflow(client, operator_token, admin_token, max_submissions=2)
     admin = _headers(admin_token)
-    room = client.post("/api/rooms", headers=admin, json={"number": "202", "dormitory_id": dormitory["id"], "floor": 2, "capacity": 1})
+    room = client.post("/api/rooms", headers=admin, json={"number": "202", "dormitory_id": dormitory["id"], "floor": 2, "capacity": 1, "price": "250000"})
     assert room.status_code == 201, room.text
 
     _fill_application(client, first_session)

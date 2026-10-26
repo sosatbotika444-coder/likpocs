@@ -6,8 +6,10 @@ import asyncio
 import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
@@ -16,7 +18,8 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.audit import audit
+from app.audit import audit, notify
+from app.billing import create_initial_period
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_current_user, require_operator
@@ -27,12 +30,16 @@ from app.models import (
     ApplicationAccessSession,
     ApplicationFile,
     ApplicationStatusEvent,
+    BillingPeriod,
     Dormitory,
+    Payment,
+    PaymentAdjustment,
     PublicRateLimit,
     Resident,
     ResidencePeriod,
     Room,
     StudentApplication,
+    SystemSetting,
     User,
     utcnow,
 )
@@ -50,6 +57,7 @@ from app.schemas import (
     ApplicationStatusEventOut,
     ApplicationStatusIn,
     ApplicationSubmitIn,
+    AdmissionSummaryOut,
     CampaignCreate,
     CampaignOut,
     DormitoryCreate,
@@ -552,7 +560,7 @@ def update_application_notes(application_id: UUID, payload: ApplicationNoteIn, d
 
 
 @staff_router.get("/admissions/applications/{application_id}/duplicates")
-def find_application_duplicates(application_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> list[dict[str, str | UUID | None]]:
+def find_application_duplicates(application_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> list[dict[str, object]]:
     _require_staff(user)
     application = db.get(StudentApplication, application_id)
     if not application:
@@ -563,7 +571,24 @@ def find_application_duplicates(application_id: UUID, db: Session = Depends(get_
     if not matches:
         name = (application.first_name_latin.strip().casefold(), application.last_name_latin.strip().casefold())
         matches = [resident for resident in candidates if (resident.first_name.casefold(), resident.last_name.casefold()) == name]
-    return [{"id": resident.id, "first_name": resident.first_name, "last_name": resident.last_name, "phone": resident.phone, "room_number": resident.room.number if resident.room else None} for resident in matches[:10]]
+    matches = matches[:10]
+    histories = db.scalars(
+        select(BillingPeriod)
+        .where(BillingPeriod.resident_id.in_([resident.id for resident in matches]))
+        .order_by(BillingPeriod.end_date.desc(), BillingPeriod.created_at.desc())
+    ).all() if matches else []
+    latest_period_by_resident: dict[UUID, BillingPeriod] = {}
+    for period in histories:
+        latest_period_by_resident.setdefault(period.resident_id, period)
+    return [{
+        "id": resident.id,
+        "first_name": resident.first_name,
+        "last_name": resident.last_name,
+        "phone": resident.phone,
+        "room_number": resident.room.number if resident.room else None,
+        "agreed_price": resident.agreed_price if resident.agreed_price is not None else (latest_period_by_resident.get(resident.id).charge_amount if resident.id in latest_period_by_resident else None),
+        "payment_period_days": resident.payment_period_days or (latest_period_by_resident.get(resident.id).period_days if resident.id in latest_period_by_resident else None),
+    } for resident in matches]
 
 
 @staff_router.post("/admissions/applications/{application_id}/request-info", response_model=ApplicationOut)
@@ -642,7 +667,38 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
         raise HTTPException(status_code=422, detail="Ariza uchun tanlangan yotoqxonadan xona tanlang.")
     resident = db.get(Resident, payload.resident_id) if payload.resident_id else None
     if payload.resident_id and not resident:
-        raise HTTPException(status_code=404, detail="Bog‘lanadigan yashovchi topilmadi.")
+        raise HTTPException(status_code=404, detail="Bog'lanadigan yashovchi topilmadi.")
+    latest_billing_period = db.scalar(
+        select(BillingPeriod)
+        .where(BillingPeriod.resident_id == resident.id)
+        .order_by(BillingPeriod.end_date.desc(), BillingPeriod.created_at.desc())
+        .limit(1)
+    ) if resident else None
+    has_open_billing_period = bool(resident and db.scalar(
+        select(BillingPeriod.id)
+        .where(BillingPeriod.resident_id == resident.id, BillingPeriod.status == "OPEN")
+        .limit(1)
+    ))
+    existing_terms = bool(latest_billing_period)
+    if payload.agreed_price is not None and user.role != "OPERATOR" and not settings.admins_can_adjust_billing:
+        raise HTTPException(status_code=403, detail="Kelishilgan narxni faqat operator belgilaydi.")
+    general = db.get(SystemSetting, "general")
+    general_values = general.value if general and isinstance(general.value, dict) else {}
+    default_period_days = int(general_values.get("default_period_days", 30))
+    if existing_terms:
+        agreed_price = resident.agreed_price if resident.agreed_price is not None else latest_billing_period.charge_amount
+        payment_period_days = resident.payment_period_days or latest_billing_period.period_days or default_period_days
+        if payload.agreed_price is not None and payload.agreed_price != agreed_price:
+            raise HTTPException(status_code=409, detail="Mavjud yashovchining tarifini avval Yashovchilar bo‘limida yangilang.")
+        if payload.payment_period_days is not None and payload.payment_period_days != payment_period_days:
+            raise HTTPException(status_code=409, detail="Mavjud yashovchining to‘lov davrini avval Yashovchilar bo‘limida yangilang.")
+    else:
+        agreed_price = payload.agreed_price if payload.agreed_price is not None else (resident.agreed_price if resident and resident.agreed_price is not None else room.price)
+        payment_period_days = payload.payment_period_days or (resident.payment_period_days if resident and resident.payment_period_days else default_period_days)
+        if agreed_price is None or agreed_price < 0:
+            raise HTTPException(status_code=422, detail="Xona narxini belgilang yoki tasdiqlash oynasida yashovchi narxini kiriting.")
+        if payment_period_days <= 0:
+            raise HTTPException(status_code=422, detail="To‘lov davri musbat kunlarda bo‘lishi kerak.")
     assert_room_available(db, room.id, payload.move_in, payload.move_out, exclude_resident_id=resident.id if resident else None)
     if resident and resident.is_archived:
         resident.is_archived = False
@@ -654,12 +710,32 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
             phone=application.phone or None,
             room_id=None,
             check_in_date=None,
+            payment_period_days=payment_period_days,
+            agreed_price=agreed_price,
             notes="",
         )
         db.add(resident)
         db.flush()
         audit(db, user, "RESIDENT_CREATED_FROM_APPLICATION", "Resident", resident.id, {"application_id": str(application.id)})
     record_room_assignment(db, resident, room.id, payload.move_in, payload.move_out, user)
+    if not has_open_billing_period:
+        resident.payment_period_days = payment_period_days
+        resident.agreed_price = agreed_price
+        billing_period = create_initial_period(
+            db,
+            resident,
+            payload.move_in,
+            payload.move_in + timedelta(days=payment_period_days),
+            user,
+        )
+        audit(db, user, "BILLING_PERIOD_CREATED_FROM_APPLICATION", "BillingPeriod", billing_period.id, {
+            "application_id": str(application.id),
+            "resident_id": str(resident.id),
+            "amount": str(billing_period.charge_amount),
+            "period_days": billing_period.period_days,
+        })
+    if payload.resident_id is None:
+        notify(db, "Yangi yashovchi", f"{resident.first_name} {resident.last_name} arizadan yashovchilar ro'yxatiga qo'shildi.", "RESIDENT", resident.id, user.id)
     application.resident_id = resident.id
     application.approved_room_id = room.id
     application.approved_move_in = payload.move_in
@@ -698,14 +774,98 @@ def reissue_tracking_code(application_id: UUID, payload: ApplicationStatusIn, db
     return {"access_code": raw_code}
 
 
+@staff_router.get("/admissions/summary", response_model=AdmissionSummaryOut)
+def admission_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> AdmissionSummaryOut:
+    _require_staff(user)
+    statuses = ("DRAFT", "SUBMITTED", "IN_REVIEW", "NEEDS_INFO", "APPROVED", "REJECTED", "CANCELLED", "ARCHIVED")
+    grouped = db.execute(
+        select(StudentApplication.status, func.count(StudentApplication.id))
+        .group_by(StudentApplication.status)
+    ).all()
+    by_status = {status: 0 for status in statuses}
+    by_status.update({status: count for status, count in grouped})
+    local_now = datetime.now(ZoneInfo(settings.timezone))
+    month_start = local_now.date().replace(day=1)
+    month_start_utc = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+    applications_this_month = db.scalar(
+        select(func.count(StudentApplication.id)).where(
+            StudentApplication.status != "DRAFT",
+            StudentApplication.created_at >= month_start_utc,
+        )
+    ) or 0
+    approved_this_month = db.scalar(
+        select(func.count(StudentApplication.id)).where(
+            StudentApplication.status == "APPROVED",
+            StudentApplication.terminal_at >= month_start_utc,
+        )
+    ) or 0
+    resident_ids = set(db.scalars(
+        select(StudentApplication.resident_id)
+        .where(StudentApplication.status == "APPROVED", StudentApplication.resident_id.is_not(None))
+        .distinct()
+    ).all())
+
+    open_periods = db.scalars(
+        select(BillingPeriod).where(
+            BillingPeriod.status == "OPEN",
+            BillingPeriod.resident_id.in_(resident_ids),
+        )
+    ).all() if resident_ids else []
+    expected_payments = sum((period.charge_amount for period in open_periods), Decimal("0.00"))
+
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    monthly_payments = db.scalars(
+        select(Payment).where(Payment.resident_id.in_(resident_ids), Payment.payment_date >= month_start, Payment.payment_date < next_month)
+    ).all() if resident_ids else []
+    period_payments = db.scalars(
+        select(Payment).where(Payment.billing_period_id.in_([period.id for period in open_periods]))
+    ).all() if open_periods else []
+    relevant_payments = {payment.id: payment for payment in [*monthly_payments, *period_payments]}
+    adjustments = db.scalars(
+        select(PaymentAdjustment).where(PaymentAdjustment.payment_id.in_(relevant_payments))
+    ).all() if relevant_payments else []
+    adjustments_by_payment: dict[UUID, Decimal] = {}
+    for adjustment in adjustments:
+        adjustments_by_payment[adjustment.payment_id] = adjustments_by_payment.get(adjustment.payment_id, Decimal("0.00")) + adjustment.amount_delta
+    paid_by_period: dict[UUID, Decimal] = {}
+    for payment in period_payments:
+        if payment.billing_period_id is not None:
+            paid_by_period[payment.billing_period_id] = paid_by_period.get(payment.billing_period_id, Decimal("0.00")) + payment.amount + adjustments_by_payment.get(payment.id, Decimal("0.00"))
+    outstanding_debt = sum((
+        max(Decimal("0.00"), period.charge_amount - max(Decimal("0.00"), paid_by_period.get(period.id, Decimal("0.00"))))
+        for period in open_periods
+    ), Decimal("0.00"))
+    actual_revenue_this_month = sum(
+        (max(Decimal("0.00"), payment.amount + adjustments_by_payment.get(payment.id, Decimal("0.00"))) for payment in monthly_payments),
+        Decimal("0.00"),
+    )
+    return AdmissionSummaryOut(
+        total_applications=sum(count for status, count in by_status.items() if status != "DRAFT"),
+        applications_this_month=applications_this_month,
+        pending_applications=sum(by_status[status] for status in ("SUBMITTED", "IN_REVIEW", "NEEDS_INFO")),
+        approved_applications=by_status["APPROVED"],
+        approved_this_month=approved_this_month,
+        rejected_applications=by_status["REJECTED"],
+        linked_residents=len(resident_ids),
+        expected_payments=expected_payments,
+        outstanding_debt=outstanding_debt,
+        actual_revenue_this_month=actual_revenue_this_month,
+        by_status=by_status,
+    )
+
+
 @staff_router.get("/admissions/settings")
-def admission_settings(user: User = Depends(get_current_user)) -> dict[str, int | bool | str | None]:
+def admission_settings(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, int | bool | str | None]:
     _require_staff(user)
     storage_ready = storage.configured()
+    general = db.get(SystemSetting, "general")
+    default_period_days = (general.value if general and isinstance(general.value, dict) else {}).get("default_period_days", 30)
     return {
         "storage_backend": storage.backend,
         "storage_configured": storage_ready,
         "retention_days": settings.file_retention_days,
+        "default_period_days": default_period_days,
+        "billing_change_allowed": settings.admins_can_adjust_billing,
         "uploads_enabled": storage_ready and (settings.environment != "production" or settings.file_retention_days is not None),
         "ocr_configured": ocr_configured(),
         "antivirus_configured": False,
