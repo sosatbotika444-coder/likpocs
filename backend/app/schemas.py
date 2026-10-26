@@ -508,7 +508,13 @@ class ApplicationFileOut(ORMModel):
     content_type: str
     size_bytes: int
     scan_status: str
+    ocr_status: str
     uploaded_at: datetime
+
+
+class ApplicationFileStaffOut(ApplicationFileOut):
+    ocr_text: str | None
+    ocr_truncated: bool
 
 
 class ApplicationStatusEventOut(ORMModel):
@@ -526,7 +532,7 @@ class ApplicationOut(PublicApplicationOut):
     resident_id: UUID | None
     assigned_to: UUID | None
     internal_notes: str
-    files: list[ApplicationFileOut] = Field(default_factory=list)
+    files: list[ApplicationFileStaffOut] = Field(default_factory=list)
     events: list[ApplicationStatusEventOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

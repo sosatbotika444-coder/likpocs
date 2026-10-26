@@ -35,6 +35,9 @@ def purge_expired_files(batch_size: int = 100) -> tuple[int, int]:
                 continue
             attachment.deleted_at = attachment.deleted_at or now
             attachment.delete_after = None
+            attachment.ocr_text = None
+            attachment.ocr_status = "DELETED"
+            attachment.ocr_truncated = False
             audit(db, None, "APPLICATION_FILE_PURGED", "ApplicationFile", attachment.id, {"kind": attachment.kind, "document_type": attachment.document_type})
             db.commit()
             deleted += 1

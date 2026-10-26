@@ -25,8 +25,10 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     initial = load_revision(root / "alembic" / "versions" / "0001_initial.py")
     current = load_revision(root / "alembic" / "versions" / "16f28cfa0755_admission_and_residency_workflow.py")
     financial = load_revision(root / "alembic" / "versions" / "20261026_01_financial_controls_and_expenses.py")
+    ocr = load_revision(root / "alembic" / "versions" / "20261026_02_application_file_ocr.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
+    application_id, application_file_id = uuid4(), uuid4()
     created = datetime.now(UTC)
     with engine.begin() as connection:
         ops = Operations(MigrationContext.configure(connection))
@@ -46,11 +48,35 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         )
         current.op = ops
         current.upgrade()
+        ops.bulk_insert(
+            table(
+                "application_files",
+                column("id", Uuid()), column("application_id", Uuid()), column("kind", String()),
+                column("document_type", String()), column("object_key", String()), column("original_name", String()),
+                column("content_type", String()), column("size_bytes", Integer()), column("scan_status", String()),
+                column("delete_after", DateTime(timezone=True)), column("deleted_at", DateTime(timezone=True)),
+                column("uploaded_at", DateTime(timezone=True)),
+            ),
+            [{
+                "id": application_file_id, "application_id": application_id, "kind": "DOCUMENT",
+                "document_type": "ID", "object_key": "admissions/legacy/id.png", "original_name": "id.png",
+                "content_type": "image/png", "size_bytes": 1, "scan_status": "NOT_CONFIGURED",
+                "delete_after": None, "deleted_at": None, "uploaded_at": created,
+            }],
+        )
         financial.op = ops
         financial.upgrade()
+        ocr.op = ops
+        ocr.upgrade()
         inspector = inspect(connection)
         expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
         assert expected <= set(inspector.get_table_names())
+        assert {"ocr_status", "ocr_text", "ocr_truncated"} <= {column["name"] for column in inspector.get_columns("application_files")}
+        ocr_backfill = connection.exec_driver_sql(
+            "SELECT ocr_status, ocr_text, ocr_truncated FROM application_files WHERE id = ?",
+            (application_file_id.hex,),
+        ).first()
+        assert ocr_backfill == ("NOT_CONFIGURED", None, 0)
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
         dormitory_id = connection.exec_driver_sql("SELECT dormitory_id FROM rooms WHERE number = '101'").scalar_one()
         dormitory_name = connection.exec_driver_sql("SELECT name FROM dormitories WHERE id = ?", (str(dormitory_id),)).scalar_one()
@@ -60,6 +86,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        ocr.downgrade()
         financial.downgrade()
         current.downgrade()
         initial.downgrade()

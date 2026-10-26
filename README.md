@@ -62,8 +62,10 @@ See `.env.example` for the supported variables. Important settings:
 | `TIMEZONE` | Billing and date boundary, defaults to `Asia/Tashkent` |
 | `ADMINS_CAN_ADJUST_BILLING` | Lets administrators change billing configuration when explicitly enabled |
 | `CORS_ORIGINS` | Comma-separated trusted browser origins |
-| `PUBLIC_APP_URL` | Public frontend origin used when generating `/apply` invitation links |
+| `PUBLIC_APP_URL` | Public frontend origin used for invitation links; defaults to `https://dormflows.netlify.app` and ignores stale localhost values |
 | `FILE_STORAGE_BACKEND`, `S3_*`, `FILE_RETENTION_DAYS` | Private production file storage and the organization-approved retention period |
+| `OCR_ENABLED`, `OCR_BINARY`, `OCR_LANGUAGES` | Local OCR switch, Tesseract executable, and language models (Uzbek Latin/Cyrillic, English, Russian by default) |
+| `OCR_MAX_PAGES`, `OCR_PAGE_TIMEOUT_SECONDS`, `OCR_MAX_PIXELS` | Limits OCR workload for uploaded PDFs and images |
 
 The billing convention uses `[start_date, end_date)`: a cycle includes its start date and ends immediately before its end date. The following cycle starts on the preceding cycle's end date. Period extensions update the open cycle and create an immutable billing-change record; they never create a payment. Actual payment records are append-only. Operators correct them by adding a signed adjustment with a reason.
 
@@ -80,7 +82,7 @@ Operators create dormitories and admission campaigns. Administrators and operato
 
 Applicants open the invitation at `/apply`. The link secret is carried in the URL fragment and removed before the page exchanges it for a short-lived, HTTP-only session. After the first submission, the applicant receives a one-time access code for later status checks and clarification requests. Only a hash of that code is stored. Staff can issue a replacement after manually checking identity.
 
-Development uses the private `private-files/` directory. Production uploads are disabled until `FILE_STORAGE_BACKEND=s3`, the private S3-compatible bucket and credentials are configured, and the organization sets `FILE_RETENTION_DAYS` to its approved period. Configure the bucket without public access. OCR and antivirus scanning are not connected; staff review remains manual and the interface shows that status.
+Development uses the private `private-files/` directory. Production uploads are disabled until `FILE_STORAGE_BACKEND=s3`, the private S3-compatible bucket and credentials are configured, and the organization sets `FILE_RETENTION_DAYS` to its approved period. Configure the bucket without public access. The backend Docker image includes local Tesseract OCR with Uzbek Latin/Cyrillic, English, and Russian models. It extracts text from documents for staff review only; OCR text is never returned by public endpoints, never approves an application, and is cleared when the source file is deleted or purged. OCR work is bounded by page, time, and pixel limits. Face recognition is not used. Antivirus scanning is still not connected, so the admissions screen reports that honestly and staff must inspect the original file.
 
 Files scheduled for deletion are purged in bounded batches. Configure a platform scheduler to run this from the backend service at an appropriate interval:
 
@@ -112,11 +114,11 @@ From `backend/`, run:
 ..\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, private file access, arbitrary billing periods, payment allocation, extensions, idempotent requests, expense voiding, export safety, and financial corrections. The release database remains PostgreSQL.
+The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, OCR privacy and file cleanup, private file access, arbitrary billing periods, payment allocation, extensions, idempotent requests, expense voiding, export safety, and financial corrections. The release database remains PostgreSQL.
 
 ## Production deployment
 
-Use HTTPS termination at a trusted reverse proxy or managed ingress, set `PUBLIC_APP_URL` to the deployed frontend origin, restrict `CORS_ORIGINS`, use strong independent secrets, restrict access to the PostgreSQL network, and back up the PostgreSQL volume on a schedule. Before accepting applications, configure private S3-compatible storage and the organization-approved `FILE_RETENTION_DAYS`; production uploads stay disabled until both are set. Configure monitoring against `/api/health`. Build and deploy immutable images from a reviewed commit; do not publish `.env` or database backups with the repository. Set `ENVIRONMENT=production` so the API rejects placeholder JWT secrets and a missing operator password.
+Use HTTPS termination at a trusted reverse proxy or managed ingress, keep `PUBLIC_APP_URL=https://dormflows.netlify.app`, restrict `CORS_ORIGINS`, use strong independent secrets, restrict access to the PostgreSQL network, and back up the PostgreSQL volume on a schedule. Before accepting applications, configure private S3-compatible storage and the organization-approved `FILE_RETENTION_DAYS`; production uploads stay disabled until both are set. Configure monitoring against `/api/health`. Build and deploy immutable images from a reviewed commit; do not publish `.env` or database backups with the repository. Set `ENVIRONMENT=production` so the API rejects placeholder JWT secrets and a missing operator password.
 
 The included Compose file is a single-host deployment baseline. For a production service, add an external TLS ingress, automated encrypted off-host backups, and a controlled migration/rollback procedure appropriate to the hosting platform.
 

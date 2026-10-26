@@ -5,13 +5,17 @@ import { CopyOutlined, DownloadOutlined, PlusOutlined, ReloadOutlined, SearchOut
 import { api, errorMessage } from '../api';
 import { formatDate } from '../locales/uz';
 import { useAuth } from '../auth';
-import type { AdmissionSettings, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicCampaign, Room } from '../types';
+import type { AdmissionSettings, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicApplicationFile, PublicCampaign, Room } from '../types';
 import { Actions, EmptyBlock, PageHeading, Panel } from './shared';
 
 const { Text } = Typography;
 const statusLabels: Record<string, string> = {
   DRAFT: 'Qoralama', SUBMITTED: 'Yuborildi', IN_REVIEW: 'Tekshiruvda', NEEDS_INFO: 'Aniqlik kerak',
   APPROVED: 'Tasdiqlandi', REJECTED: 'Rad etildi', CANCELLED: 'Bekor qilindi', ARCHIVED: 'Arxiv',
+};
+const ocrStatusLabels: Record<string, string> = {
+  COMPLETED: 'Matn olindi', PARTIAL: 'Cheklangan natija', NO_TEXT: 'Matn topilmadi',
+  NOT_CONFIGURED: 'Sozlanmagan', FAILED: 'O‘qib bo‘lmadi', SKIPPED: 'Qo‘llanmaydi', DELETED: 'O‘chirildi',
 };
 const dataLabels: Record<string, string> = {
   first_name_latin: 'Ism (lotin)', last_name_latin: 'Familiya (lotin)', middle_name_latin: 'Otasining ismi (lotin)',
@@ -36,7 +40,7 @@ function PublicIntake() {
   const [notice, holder] = notification.useNotification();
   const [campaign, setCampaign] = useState<PublicCampaign | null>(null);
   const [application, setApplication] = useState<PublicApplication | null>(null);
-  const [files, setFiles] = useState<ApplicationFile[]>([]);
+  const [files, setFiles] = useState<PublicApplicationFile[]>([]);
   const [csrf, setCsrf] = useState('');
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -65,7 +69,7 @@ function PublicIntake() {
   const loadSession = async () => {
     const result = await api.get<{ csrf_token: string; campaign: PublicCampaign; application: PublicApplication }>('/public/application');
     hydrate(result.data.application, result.data.campaign, result.data.csrf_token);
-    const uploaded = await api.get<ApplicationFile[]>('/public/application/files');
+    const uploaded = await api.get<PublicApplicationFile[]>('/public/application/files');
     setFiles(uploaded.data);
   };
 
@@ -79,7 +83,7 @@ function PublicIntake() {
       const draftKey = sessionStorage.getItem(keyName) || crypto.randomUUID();
       sessionStorage.setItem(keyName, draftKey);
       void api.post<{ csrf_token: string; campaign: PublicCampaign; application: PublicApplication }>('/public/invitations/exchange', { token, draft_key: draftKey })
-        .then(async (result) => { hydrate(result.data.application, result.data.campaign, result.data.csrf_token); setFiles((await api.get<ApplicationFile[]>('/public/application/files')).data); })
+        .then(async (result) => { hydrate(result.data.application, result.data.campaign, result.data.csrf_token); setFiles((await api.get<PublicApplicationFile[]>('/public/application/files')).data); })
         .catch((error: unknown) => { setAccessRequired(true); notice.error({ message: 'Taklif havolasi ochilmadi', description: errorMessage(error) }); })
         .finally(() => setLoading(false));
     } else {
@@ -147,7 +151,7 @@ function PublicIntake() {
     body.append('document_type', documentType);
     body.append('upload', file);
     try {
-      const result = await api.post<ApplicationFile>('/public/application/files', body, {
+      const result = await api.post<PublicApplicationFile>('/public/application/files', body, {
         headers: { 'X-CSRF-Token': csrf },
         onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.round((event.loaded * 100) / event.total) : 45 })),
       });
@@ -205,7 +209,7 @@ function PublicIntake() {
           <Form.Item name="emergency_name" label="Favqulodda aloqa uchun yaqin inson"><Input maxLength={160}/></Form.Item><Form.Item name="emergency_phone" label="Favqulodda telefon"><Input type="tel" maxLength={40}/></Form.Item>
         </div>}
         {step === 1 && <div className="form-grid"><Form.Item name="institution" label="Ta’lim muassasasi" rules={[{required:true,message:'Ta’lim muassasasini kiriting.'}]}><Input maxLength={200}/></Form.Item><Form.Item name="faculty" label="Fakultet yoki yo‘nalish"><Input maxLength={160}/></Form.Item><Form.Item name="course" label="Kurs"><Input maxLength={40}/></Form.Item><Form.Item name="study_group" label="Guruh"><Input maxLength={80}/></Form.Item><Form.Item name="study_start" label="O‘qish davri boshlanishi"><DatePicker className="full-width"/></Form.Item><Form.Item name="study_end" label="O‘qish davri tugashi"><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_in" label="Ko‘chib kirish sanasi" rules={[{required:true,message:'Taxminiy sanani kiriting.'}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_out" label="Ko‘chib chiqish sanasi"><DatePicker className="full-width"/></Form.Item><Form.Item name="preferences" label="Joylashish bo‘yicha istaklar" className="form-span"><Input.TextArea rows={3} maxLength={2000}/></Form.Item>{customFields.map((field) => <Form.Item key={field.key} name={field.key} label={field.label} valuePropName={field.kind === 'checkbox' ? 'checked' : 'value'} rules={field.required ? [field.kind === 'checkbox' ? {validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Ushbu maydonni belgilang.'))} : {required:true}] : []}>{field.kind === 'select' ? <Select options={field.options.map((option)=>({value:option,label:option}))}/> : field.kind === 'checkbox' ? <Checkbox/> : field.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>)}</div>}
-        {step === 2 && <><Alert type="info" showIcon message="OCR sozlanmagan — ma’lumotlarni qo‘lda tekshiring" description="Hujjatning haqiqiyligi xodim tomonidan alohida tekshiriladi. Yuzni aniqlash bajarilmaydi."/><h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
+        {step === 2 && <><Alert type="info" showIcon message="Hujjat matni avtomatik o‘qilishi mumkin" description="OCR faqat xodimga yordam beradi. Arizani tasdiqlashdan oldin hujjatlar alohida tekshiriladi; yuzni aniqlash bajarilmaydi."/><h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
       </>}
       <div className="public-form-actions">{step > 0 && !isClarification && <Button onClick={() => setStep((current)=>Math.max(0,current-1))}>Orqaga</Button>}{step < 2 && !isClarification ? <Button type="primary" onClick={() => void next()} loading={busy}>Saqlash va davom etish</Button> : <Button type="primary" htmlType="submit" loading={busy}>{isClarification ? 'Javobni yuborish' : 'Arizani yuborish'}</Button>}</div>
     </Form>
@@ -347,6 +351,7 @@ function StaffAdmissions() {
   const fileColumns = [
     {title:'Fayl',dataIndex:'original_name',render:(value:string,file:ApplicationFile)=><div><strong>{value}</strong><div><Text type="secondary">{file.kind==='PHOTO'?'Surat':file.document_type} · {Math.ceil(file.size_bytes/1024)} KB</Text></div></div>},
     {title:'Virus tekshiruvi',dataIndex:'scan_status',render:(value:string)=><Tag>{value==='NOT_CONFIGURED'?'Tekshirilmagan':value}</Tag>},
+    {title:'OCR',dataIndex:'ocr_status',render:(value:string,file:ApplicationFile)=><div><Tag color={value==='COMPLETED'?'green':value==='PARTIAL'?'orange':'default'}>{ocrStatusLabels[value]||value}</Tag>{file.ocr_text&&<details className="ocr-result"><summary>Ko‘rilgan matn</summary><pre>{file.ocr_text}</pre>{file.ocr_truncated&&<Text type="secondary">Matn yoki sahifalar cheklov sabab qisqartirildi.</Text>}<Text type="secondary">OCR xulosasini asl hujjat bilan solishtirib tekshiring.</Text></details>}</div>},
     {title:'',align:'right' as const,render:(_:unknown,file:ApplicationFile)=><Button icon={<DownloadOutlined/>} onClick={()=>void download(file)}>Himoyalangan ko‘rish</Button>},
   ];
   const dormitoryColumns = [
@@ -369,7 +374,7 @@ function StaffAdmissions() {
     ]}/>
 
     <Drawer open={Boolean(detail)} onClose={()=>setDetail(null)} width={Math.min(780,window.innerWidth-20)} title={detail ? `${detail.reference} · ${statusLabels[detail.status]||detail.status}` : ''} extra={detail && <Space>{canDecide && detail.status==='SUBMITTED' && <Button onClick={()=>void api.post(`/admissions/applications/${detail.id}/start-review`).then(refreshDetail).catch((error:unknown)=>notice.error({message:errorMessage(error)}))}>Tekshiruvni boshlash</Button>}{canDecide && <Button type="primary" onClick={()=>{setActionKind('approve');actionForm.setFieldsValue({move_in:detail.requested_move_in?dayjs(detail.requested_move_in):dayjs()});}}>Tasdiqlash</Button>}</Space>}>
-      {detail && <div className="detail-stack admission-detail">{holder}<div>{statusTag(detail.status)} <Text type="secondary">Yuborildi: {formatDate(detail.created_at.slice(0,10),true)}</Text></div><Alert type="info" showIcon message="OCR hozircha sozlanmagan" description="Xodim ma’lumot va hujjatlarni qo‘lda tekshiradi. Bu holat shaxsni tasdiqlamaydi."/><Descriptions bordered size="small" column={2} items={[
+      {detail && <div className="detail-stack admission-detail">{holder}<div>{statusTag(detail.status)} <Text type="secondary">Yuborildi: {formatDate(detail.created_at.slice(0,10),true)}</Text></div><Alert type="info" showIcon message={settings?.ocr_configured?'OCR xodim uchun yordamchi vosita sifatida yoqilgan':'OCR mavjud emas; hujjatni qo‘lda tekshiring'} description="OCR matni faqat xodimga ko‘rinadi. Har bir xulosa asl hujjat bilan solishtiriladi va avtomatik qaror qabul qilinmaydi."/><Descriptions bordered size="small" column={2} items={[
         {key:'name',label:'F.I.Sh. (lotin)',children:`${detail.last_name_latin} ${detail.first_name_latin} ${detail.middle_name_latin}`},{key:'name_cyr',label:'F.I.Sh. (kirill)',children:`${detail.last_name_cyrillic} ${detail.first_name_cyrillic} ${detail.middle_name_cyrillic}`},
         {key:'dob',label:'Tug‘ilgan sana',children:formatDate(detail.birth_date,true)},{key:'phone',label:'Telefon',children:detail.phone},{key:'email',label:'Pochta',children:detail.email||'—'},
         {key:'address',label:'Manzil',children:detail.address||'—'},{key:'emergency',label:'Favqulodda aloqa',children:`${detail.emergency_name||'—'} · ${detail.emergency_phone||'—'}`},

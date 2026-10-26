@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import asyncio
 import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
@@ -35,6 +36,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.ocr import OCRResult, extract_document_text, ocr_configured
 from app.residency import assert_room_available, record_room_assignment
 from app.schemas import (
     ApplicationApproveIn,
@@ -430,7 +432,7 @@ def create_invitation(payload: InvitationCreate, db: Session = Depends(get_db), 
     audit(db, user, "INVITATION_CREATED", "AdmissionInvitation", row.id, {"campaign_id": str(campaign.id), "max_submissions": row.max_submissions})
     db.commit()
     db.refresh(row)
-    link = f"{settings.public_app_url.rstrip('/')}/apply#{raw_token}"
+    link = f"{settings.public_app_base_url}/apply#{raw_token}"
     return _invite_out(row, link)
 
 
@@ -665,6 +667,14 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
     application.review_reason = payload.reason.strip()
     application.assigned_to = user.id
     application.terminal_at = utcnow()
+    retention = settings.file_retention_days
+    if retention:
+        attachments = db.scalars(select(ApplicationFile).where(
+            ApplicationFile.application_id == application.id,
+            ApplicationFile.deleted_at.is_(None),
+        )).all()
+        for attachment in attachments:
+            attachment.delete_after = application.terminal_at + timedelta(days=retention)
     _event(db, application, "APPROVED", user, payload.reason.strip())
     audit(db, user, "APPLICATION_APPROVED", "StudentApplication", application.id, {"resident_id": str(resident.id), "room_id": str(room.id)})
     try:
@@ -697,7 +707,7 @@ def admission_settings(user: User = Depends(get_current_user)) -> dict[str, int 
         "storage_configured": storage_ready,
         "retention_days": settings.file_retention_days,
         "uploads_enabled": storage_ready and (settings.environment != "production" or settings.file_retention_days is not None),
-        "ocr_configured": False,
+        "ocr_configured": ocr_configured(),
         "antivirus_configured": False,
     }
 
@@ -746,6 +756,9 @@ def delete_application_file(application_id: UUID, file_id: UUID, db: Session = D
     audit(db, user, "APPLICATION_FILE_DELETED", "ApplicationFile", attachment.id, {"kind": attachment.kind, "document_type": attachment.document_type})
     storage.delete(attachment.object_key)
     attachment.deleted_at = utcnow()
+    attachment.ocr_text = None
+    attachment.ocr_status = "DELETED"
+    attachment.ocr_truncated = False
     db.commit()
     return Response(status_code=204)
 
@@ -849,6 +862,9 @@ async def upload_public_file(
     if kind == "DOCUMENT" and "document:" + document_type not in application.requested_fields and application.status == "NEEDS_INFO":
         raise HTTPException(status_code=403, detail="Ushbu hujjatni yangilash so‘ralmagan.")
     suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
+    ocr_result = OCRResult("SKIPPED")
+    if kind == "DOCUMENT":
+        ocr_result = await asyncio.to_thread(extract_document_text, content, content_type)
     object_key = f"admissions/{application.id}/{uuid4().hex}{suffix}"
     replacement_query = select(ApplicationFile).where(
         ApplicationFile.application_id == application.id,
@@ -867,6 +883,9 @@ async def upload_public_file(
         for previous in previous_files:
             previous.deleted_at = replaced_at
             previous.delete_after = replaced_at
+            previous.ocr_text = None
+            previous.ocr_status = "DELETED"
+            previous.ocr_truncated = False
         uploaded_at = utcnow()
         retention = settings.file_retention_days
         row = ApplicationFile(
@@ -878,6 +897,9 @@ async def upload_public_file(
             content_type=content_type,
             size_bytes=len(content),
             scan_status="NOT_CONFIGURED",
+            ocr_status=ocr_result.status,
+            ocr_text=ocr_result.text,
+            ocr_truncated=ocr_result.truncated,
             delete_after=uploaded_at + timedelta(days=retention) if application.status == "DRAFT" and retention else None,
             uploaded_at=uploaded_at,
         )

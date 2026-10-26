@@ -68,10 +68,12 @@ export type ApplicationData = {
   study_start: string | null; study_end: string | null; requested_move_in: string | null; requested_move_out: string | null;
   preferences: string; additional_data: Record<string, string | boolean | null>;
 };
-export type ApplicationFile = {
+type ApplicationFileBase = {
   id: string; kind: 'PHOTO' | 'DOCUMENT'; document_type: string; original_name: string;
-  content_type: string; size_bytes: number; scan_status: string; uploaded_at: string;
+  content_type: string; size_bytes: number; scan_status: string; ocr_status: string; uploaded_at: string;
 };
+export type ApplicationFile = ApplicationFileBase & { ocr_text: string | null; ocr_truncated: boolean };
+export type PublicApplicationFile = ApplicationFileBase;
 export type ApplicationEvent = { from_status: string; to_status: string; reason: string; created_at: string };
 export type Application = ApplicationData & {
   id: string; reference: string; status: string; requested_fields: string[]; review_reason: string;

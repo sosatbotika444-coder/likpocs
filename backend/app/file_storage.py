@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, UploadFile
+from PIL import Image, UnidentifiedImageError
 
 from app.config import settings
 
@@ -35,6 +36,19 @@ def validate_upload(upload: UploadFile, content: bytes) -> tuple[str, str]:
     if len(content) > settings.file_max_bytes:
         raise HTTPException(status_code=413, detail="Fayl hajmi ruxsat etilgan chegaradan oshdi.")
     content_type = sniff_content_type(content)
+    if content_type.startswith("image/"):
+        expected_format = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}[content_type]
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                if image.format != expected_format:
+                    raise HTTPException(status_code=415, detail="Rasm faylining formati noto'g'ri.")
+                if image.width * image.height > settings.file_max_image_pixels:
+                    raise HTTPException(status_code=413, detail="Rasm o'lchami ruxsat etilgan chegaradan oshdi.")
+                image.verify()
+        except HTTPException:
+            raise
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(status_code=415, detail="Rasm fayli buzilgan yoki uni o'qib bo'lmadi.") from None
     suffix = Path(upload.filename or "").suffix.lower()
     if suffix and suffix not in ALLOWED_TYPES[content_type]:
         raise HTTPException(status_code=415, detail="Fayl kengaytmasi uning mazmuniga mos emas.")

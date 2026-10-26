@@ -1,11 +1,14 @@
+import io
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from PIL import Image
 from sqlalchemy import func, select
 
 from app.config import settings
 from app.models import (
     AdmissionInvitation,
+    ApplicationFile,
     ApplicationStatusEvent,
     AuditEvent,
     BillingPeriod,
@@ -13,19 +16,27 @@ from app.models import (
     Resident,
     StudentApplication,
 )
+from app.ocr import OCRResult
+
+
+def _png_bytes() -> bytes:
+    image = Image.new("RGB", (8, 8), "white")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _workflow(client, operator_token: str, admin_token: str, *, max_submissions: int = 1):
+def _workflow(client, operator_token: str, admin_token: str, *, max_submissions: int = 1, document_types: list[str] | None = None):
     dormitory = client.post("/api/dormitories", headers=_headers(operator_token), json={"name": "North Dorm", "address": ""})
     assert dormitory.status_code == 201, dormitory.text
     campaign = client.post("/api/admissions/campaigns", headers=_headers(operator_token), json={
         "name": "Autumn intake",
         "dormitory_id": dormitory.json()["id"],
-        "document_types": [],
+        "document_types": document_types or [],
         "custom_fields": [],
         "consent_version": "v1",
         "consent_text": "I agree to admission data processing.",
@@ -57,13 +68,14 @@ def _fill_application(client, session: dict, *, phone: str = "+998901234567") ->
         "/api/public/application/files",
         headers={"X-CSRF-Token": session["csrf_token"]},
         data={"kind": "PHOTO", "document_type": ""},
-        files={"upload": ("photo.png", b"\x89PNG\r\n\x1a\nvalid image bytes", "image/png")},
+        files={"upload": ("photo.png", _png_bytes(), "image/png")},
     )
     assert upload.status_code == 201, upload.text
 
 
 def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+    monkeypatch.setattr(settings, "file_retention_days", 30)
     dormitory, _, invitation, raw_invite, public_session = _workflow(client, operator_token, admin_token)
 
     _fill_application(client, public_session)
@@ -109,7 +121,7 @@ def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, datab
         "/api/public/application/files",
         headers={"X-CSRF-Token": public_session["csrf_token"]},
         data={"kind": "PHOTO", "document_type": ""},
-        files={"upload": ("new-photo.png", b"\x89PNG\r\n\x1a\nupdated image bytes", "image/png")},
+        files={"upload": ("new-photo.png", _png_bytes(), "image/png")},
     )
     assert refreshed_photo.status_code == 201
     final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
@@ -123,6 +135,8 @@ def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, datab
         "move_in": "2026-11-01",
     })
     assert approved.status_code == 200, approved.text
+    stored_file = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.deleted_at.is_(None)))
+    assert stored_file is not None and stored_file.delete_after is not None
     resident = database.get(Resident, UUID(approved.json()["resident_id"]))
     assert resident is not None and resident.room_id is not None
     assert database.scalar(select(func.count(ResidencePeriod.id)).where(ResidencePeriod.resident_id == resident.id)) == 1
@@ -133,6 +147,60 @@ def test_admission_submit_is_idempotent_and_approval_does_not_bill(client, datab
     assert repeated_approval.status_code == 200
     assert database.scalar(select(func.count(Resident.id))) == 1
     assert database.scalar(select(func.count(ResidencePeriod.id))) == 1
+
+
+def test_invitation_uses_public_domain_when_local_setting_is_stale(client, operator_token, admin_token, monkeypatch):
+    monkeypatch.setattr(settings, "environment", "development")
+    monkeypatch.setattr(settings, "public_app_url", "http://localhost:5173")
+    _, _, invitation, _, _ = _workflow(client, operator_token, admin_token)
+    assert invitation["link"].startswith("https://dormflows.netlify.app/apply#")
+    assert "https://dormflows.netlify.app" in settings.cors_origin_list
+
+
+def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+    monkeypatch.setattr("app.admissions_api.extract_document_text", lambda *_: OCRResult("COMPLETED", "STUDENT: Aziza Karimova"))
+    _, campaign, _, _, public_session = _workflow(client, operator_token, admin_token, document_types=["ID"])
+    assert campaign["document_types"] == ["ID"]
+    _fill_application(client, public_session)
+    upload = client.post(
+        "/api/public/application/files",
+        headers={"X-CSRF-Token": public_session["csrf_token"]},
+        data={"kind": "DOCUMENT", "document_type": "ID"},
+        files={"upload": ("identity.png", _png_bytes(), "image/png")},
+    )
+    assert upload.status_code == 201, upload.text
+    assert upload.json()["ocr_status"] == "COMPLETED"
+    assert "ocr_text" not in upload.json()
+    public_files = client.get("/api/public/application/files")
+    assert public_files.status_code == 200
+    assert all("ocr_text" not in file for file in public_files.json())
+
+    application = database.scalar(select(StudentApplication))
+    attachment = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.kind == "DOCUMENT"))
+    admin = _headers(admin_token)
+    detail = client.get(f"/api/admissions/applications/{application.id}", headers=admin)
+    assert detail.status_code == 200, detail.text
+    staff_file = next(file for file in detail.json()["files"] if file["id"] == str(attachment.id))
+    assert staff_file["ocr_text"] == "STUDENT: Aziza Karimova"
+
+    removed = client.delete(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=admin)
+    assert removed.status_code == 204
+    database.refresh(attachment)
+    assert attachment.ocr_text is None
+    assert attachment.ocr_status == "DELETED"
+
+
+def test_rejects_a_forged_image_instead_of_saving_it(client, database, operator_token, admin_token):
+    _, _, _, _, public_session = _workflow(client, operator_token, admin_token, document_types=["ID"])
+    response = client.post(
+        "/api/public/application/files",
+        headers={"X-CSRF-Token": public_session["csrf_token"]},
+        data={"kind": "DOCUMENT", "document_type": "ID"},
+        files={"upload": ("fake.png", b"\x89PNG\r\n\x1a\nnot-an-image", "image/png")},
+    )
+    assert response.status_code == 415
+    assert database.scalar(select(func.count(ApplicationFile.id))) == 0
 
 
 def test_invitation_pause_resume_revoke_expiry_and_role_access(client, database, operator_token, admin_token):
