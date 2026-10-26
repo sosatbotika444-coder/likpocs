@@ -24,6 +24,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     root = Path(__file__).parents[1]
     initial = load_revision(root / "alembic" / "versions" / "0001_initial.py")
     current = load_revision(root / "alembic" / "versions" / "16f28cfa0755_admission_and_residency_workflow.py")
+    financial = load_revision(root / "alembic" / "versions" / "20261026_01_financial_controls_and_expenses.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
     created = datetime.now(UTC)
@@ -45,8 +46,10 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         )
         current.op = ops
         current.upgrade()
+        financial.op = ops
+        financial.upgrade()
         inspector = inspect(connection)
-        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits"}
+        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
         assert expected <= set(inspector.get_table_names())
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
         dormitory_id = connection.exec_driver_sql("SELECT dormitory_id FROM rooms WHERE number = '101'").scalar_one()
@@ -57,6 +60,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        financial.downgrade()
         current.downgrade()
         initial.downgrade()
         assert not (expected & set(inspect(connection).get_table_names()))

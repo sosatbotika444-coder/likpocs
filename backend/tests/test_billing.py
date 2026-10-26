@@ -118,3 +118,14 @@ def test_invalid_billing_dates_are_rejected(client, operator_token):
         "billing_start": (tday() + timedelta(days=5)).isoformat(), "billing_end": tday().isoformat(),
     })
     assert response.status_code == 422
+
+
+def test_price_changes_preserve_old_and_new_cycle_amounts(client, operator_token):
+    person = resident(client, operator_token)
+    response = client.patch(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}, json={"agreed_price": "725000"})
+    assert response.status_code == 200, response.text
+    detail = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
+    assert detail["billing_history"][0]["charge_amount"] == "725000.00"
+    assert detail["changes"][0]["old_charge_amount"] == "600000.00"
+    assert detail["changes"][0]["new_charge_amount"] == "725000.00"
+    assert detail["changes"][0]["change_type"] == "PRICE_CHANGE"

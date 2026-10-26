@@ -23,7 +23,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    description="DormFlow yotoqxona boshqaruv API xizmati.",
+    description="RS Best Hostel yotoqxona boshqaruv API xizmati.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -32,7 +32,7 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "Idempotency-Key"],
 )
 
 
@@ -65,4 +65,4 @@ app.include_router(public_router)
 
 @app.get("/", include_in_schema=False)
 def root() -> dict[str, str]:
-    return {"name": "DormFlow", "status": "ok", "api": "/api"}
+    return {"name": "RS Best Hostel", "status": "ok", "api": "/api"}

@@ -136,8 +136,10 @@ class BillingChangeOut(ORMModel):
     billing_period_id: UUID
     old_start_date: date
     old_end_date: date
+    old_charge_amount: Decimal | None = None
     new_start_date: date
     new_end_date: date
+    new_charge_amount: Decimal | None = None
     change_type: str
     reason: str
     changed_by: UUID
@@ -208,6 +210,34 @@ class PaymentCreate(BaseModel):
     notes: str = Field(default="", max_length=2000)
 
 
+ExpenseCategory = Literal["UTILITIES", "REPAIR", "SUPPLIES", "FOOD", "SALARY", "OTHER"]
+
+
+class ExpenseCreate(BaseModel):
+    expense_date: date
+    category: ExpenseCategory
+    description: str = Field(min_length=2, max_length=500)
+    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    method: PaymentMethod
+    reference: str = Field(default="", max_length=120)
+
+    @model_validator(mode="after")
+    def normalized_description_required(self):
+        if len(self.description.strip()) < 2:
+            raise ValueError("Xarajat tafsilotini kamida 2 ta belgi bilan kiriting.")
+        return self
+
+
+class ExpenseVoid(BaseModel):
+    reason: str = Field(min_length=5, max_length=1000)
+
+    @model_validator(mode="after")
+    def normalized_reason_required(self):
+        if len(self.reason.strip()) < 5:
+            raise ValueError("Bekor qilish sababini kamida 5 ta belgi bilan kiriting.")
+        return self
+
+
 class PaymentAdjustmentCreate(BaseModel):
     amount_delta: Decimal = Field(max_digits=14, decimal_places=2)
     reason: str = Field(min_length=5, max_length=2000)
@@ -236,6 +266,22 @@ class PaymentOut(ORMModel):
     created_at: datetime
 
 
+class ExpenseOut(ORMModel):
+    id: UUID
+    expense_date: date
+    category: ExpenseCategory
+    description: str
+    amount: Decimal
+    method: str
+    reference: str
+    recorded_by: UUID
+    recorded_by_name: str = ""
+    voided_at: datetime | None
+    voided_by: UUID | None
+    void_reason: str
+    created_at: datetime
+
+
 class PaymentAdjustmentOut(ORMModel):
     id: UUID
     payment_id: UUID
@@ -261,6 +307,8 @@ class DashboardOut(BaseModel):
     due_soon: int
     overdue: int
     actual_revenue: Decimal
+    actual_expenses: Decimal
+    net_cash_flow: Decimal
     expected_payments: Decimal
     outstanding_debt: Decimal
     revenue_trend: list[dict]

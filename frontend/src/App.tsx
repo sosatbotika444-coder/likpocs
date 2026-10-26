@@ -1,29 +1,35 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Badge, Button, Dropdown, Layout, Menu, Spin, Typography, Grid, Drawer, notification } from 'antd';
 import {
   AppstoreOutlined, BellOutlined, FileExcelOutlined,
   HomeOutlined, LogoutOutlined, MenuOutlined, SettingOutlined, TeamOutlined, UserOutlined, SolutionOutlined,
-  WalletOutlined, AuditOutlined, QuestionCircleOutlined,
+  WalletOutlined, DollarCircleOutlined, AuditOutlined, QuestionCircleOutlined,
 } from '@ant-design/icons';
 import { api, errorMessage } from './api';
 import { useAuth } from './auth';
 import { uz, formatDate } from './locales/uz';
 import type { Notification as AppNotification, Role } from './types';
-import Dashboard from './pages/Dashboard';
-import Residents from './pages/Residents';
-import Rooms from './pages/Rooms';
-import Payments from './pages/Payments';
-import Reports from './pages/Reports';
-import SettingsPage from './pages/Settings';
-import Landing from './pages/Landing';
-import Admissions, { PublicApplication } from './pages/Admissions';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Residents = lazy(() => import('./pages/Residents'));
+const Rooms = lazy(() => import('./pages/Rooms'));
+const Payments = lazy(() => import('./pages/Payments'));
+const Reports = lazy(() => import('./pages/Reports'));
+const Expenses = lazy(() => import('./pages/Expenses'));
+const SettingsPage = lazy(() => import('./pages/Settings'));
+const Landing = lazy(() => import('./pages/Landing'));
+const Admissions = lazy(() => import('./pages/Admissions'));
+const PublicApplication = lazy(async () => {
+  const module = await import('./pages/Admissions');
+  return { default: module.PublicApplication };
+});
 
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
 const routeTitles: Record<string, string> = {
   '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
-  '/payments': uz.nav.payments, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
+  '/payments': uz.nav.payments, '/expenses': uz.nav.expenses, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
   '/admissions': uz.nav.admissions,
 };
 
@@ -50,13 +56,13 @@ function Login() {
   return <main className="login-page">
     {contextHolder}
     <section className="login-art">
-      <Link className="brand brand-light" to="/"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">dorm<span>flow</span><small>{uz.brand.subtitle}</small></span></Link>
+      <Link className="brand brand-light" to="/"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span><small>{uz.brand.subtitle}</small></span></Link>
       <div className="login-art-copy"><div className="eyebrow">{uz.login.eyebrow}</div><h1>{uz.login.title}</h1><p>{uz.login.subtitle}</p><div className="login-illustration" aria-hidden="true"><div className="art-orbit"/><div className="art-building"><i/><i/><i/><i/></div><span className="art-spark spark-one">✳</span><span className="art-spark spark-two">✦</span></div></div>
       <div className="login-art-footer"><span>✳</span> {uz.login.security}</div>
     </section>
-    <section className="login-form-side"><div className="login-form-wrap"><div className="mobile-brand"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">dorm<span>flow</span></span></div><div className="eyebrow">Xush kelibsiz</div><h2>Hisobingizga kiring</h2><p className="muted">Ishni davom ettirish uchun ma’lumotlaringizni kiriting.</p>
+    <section className="login-form-side"><div className="login-form-wrap"><div className="mobile-brand"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span></span></div><div className="eyebrow">Xush kelibsiz</div><h2>Hisobingizga kiring</h2><p className="muted">Ishni davom ettirish uchun ma’lumotlaringizni kiriting.</p>
       <form className="login-form" onSubmit={submit}><label htmlFor="email">{uz.login.email}</label><input id="email" name="email" type="email" autoComplete="username" required placeholder="operator@maskan.uz"/><label htmlFor="password">{uz.login.password}</label><input id="password" name="password" type="password" autoComplete="current-password" required minLength={1}/><Button type="primary" htmlType="submit" size="large" loading={busy} block>{uz.login.submit}<span aria-hidden="true"> →</span></Button></form>
-      <div className="login-security"><span className="security-lock">⌑</span><span>Hisobingiz xavfsiz shifrlangan ulanish orqali himoyalangan.</span></div>
+      <div className="login-security"><span className="security-lock">⌑</span><span>Kirish ma’lumotlari tizim tomonidan himoyalangan.</span></div>
     </div></section>
   </main>;
 }
@@ -71,7 +77,7 @@ function Shell() {
   const [alerts, setAlerts] = useState<AppNotification[]>([]);
   const [notice, contextHolder] = notification.useNotification();
   const current = routeTitles[location.pathname] || (location.pathname === '/settings/users' ? uz.nav.users : location.pathname === '/settings/audit' ? uz.nav.audit : uz.nav.dashboard);
-  const initials = user?.full_name.split(/\s+/).slice(0, 2).map((item) => item[0]).join('').toLocaleUpperCase('uz-UZ') || 'DF';
+  const initials = user?.full_name.split(/\s+/).slice(0, 2).map((item) => item[0]).join('').toLocaleUpperCase('uz-UZ') || 'RS';
 
   const loadAlerts = async () => {
     try { setAlerts((await api.get<AppNotification[]>('/notifications')).data); }
@@ -85,6 +91,7 @@ function Shell() {
     { key: '/rooms', icon: <HomeOutlined />, label: uz.nav.rooms },
     { key: '/admissions', icon: <SolutionOutlined />, label: uz.nav.admissions },
     { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
+    { key: '/expenses', icon: <DollarCircleOutlined />, label: uz.nav.expenses },
     { key: '/reports', icon: <FileExcelOutlined />, label: uz.nav.reports },
     { type: 'divider' as const },
     { key: '/settings', icon: <SettingOutlined />, label: uz.nav.settings },
@@ -95,11 +102,11 @@ function Shell() {
   ], [user?.role]);
 
   const sidebar = <>
-    <Link className="brand" to="/" onClick={() => setDrawer(false)}><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">dorm<span>flow</span><small>{uz.brand.subtitle}</small></span></Link>
+    <Link className="brand" to="/" onClick={() => setDrawer(false)}><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span><small>{uz.brand.subtitle}</small></span></Link>
     <div className="side-section-label">ISH MAYDONI</div>
     <Menu theme="dark" mode="inline" selectedKeys={[location.pathname]} items={menuItems} onClick={({ key }) => { navigate(key); setDrawer(false); }} />
     <div className="sidebar-spacer"/>
-    <div className="help-card"><span className="help-spark">✳</span><strong>Yordam kerakmi?</strong><p>DormFlow bo‘yicha qo‘llanmani oching.</p><Button type="link" icon={<QuestionCircleOutlined />} onClick={() => notice.info({ message: 'DormFlow qo‘llanmasi', description: 'Yashovchi, xona va to‘lovlarni menyu bo‘limlaridan boshqaring. To‘lov muddati uzaytirilganda u to‘lov sifatida qayd etilmaydi.' })}>Qo‘llanmani ko‘rish</Button></div>
+    <div className="help-card"><span className="help-spark">✳</span><strong>Yordam kerakmi?</strong><p>RS Best Hostel bo‘yicha qo‘llanmani oching.</p><Button type="link" icon={<QuestionCircleOutlined />} onClick={() => notice.info({ message: 'RS Best Hostel qo‘llanmasi', description: 'Yashovchi, xona va to‘lovlarni menyu bo‘limlaridan boshqaring. To‘lov muddati uzaytirilganda u to‘lov sifatida qayd etilmaydi.' })}>Qo‘llanmani ko‘rish</Button></div>
     <div className="side-account"><Avatar size={34} className="account-avatar">{initials}</Avatar><div className="account-copy"><strong>{user?.full_name}</strong><small>{user ? uz.role[user.role as Role] : ''}</small></div><Button type="text" icon={<LogoutOutlined />} aria-label="Tizimdan chiqish" onClick={logout}/></div>
   </>;
 
@@ -115,7 +122,7 @@ function Shell() {
       <Header className="app-header">
         {mobile && <Button type="text" icon={<MenuOutlined />} aria-label="Menyuni ochish" onClick={() => setDrawer(true)}/>}
         <div className="breadcrumb"><span>Asosiy</span><b>/</b><strong>{current}</strong></div>
-        <div className="header-actions"><Text className="header-date">{new Intl.DateTimeFormat('uz-UZ',{weekday:'short',day:'numeric',month:'short'}).format(new Date())}</Text>
+        <div className="header-actions"><Text className="header-date">{new Intl.DateTimeFormat('uz-UZ',{weekday:'short',day:'numeric',month:'short',timeZone:'Asia/Tashkent'}).format(new Date())}</Text>
           <Dropdown menu={notificationMenu} trigger={['click']} placement="bottomRight"><Button type="text" className="notification-trigger" aria-label="Bildirishnomalar"><Badge dot={alerts.length > 0}><BellOutlined/></Badge></Button></Dropdown>
           <span className="header-divider"/><Dropdown menu={{items:[{key:'profile',label:'Hisob ma’lumotlari',icon:<UserOutlined/>,onClick:()=>navigate('/settings')},{key:'logout',label:'Tizimdan chiqish',icon:<LogoutOutlined/>,onClick:logout}]}} trigger={['click']}><Button type="text" className="profile-trigger"><Avatar size={30}>{initials}</Avatar><span className="profile-name">{user?.full_name}</span></Button></Dropdown>
         </div>
@@ -146,7 +153,7 @@ function OperatorOnly({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
-  return <Routes>
+  return <Suspense fallback={<div className="auth-loading"><Spin size="large" /></div>}><Routes>
     <Route path="/" element={<Home/>}/>
     <Route path="/login" element={<Login/>}/>
     <Route path="/apply" element={<PublicApplication/>}/>
@@ -156,11 +163,12 @@ export default function App() {
       <Route path="/rooms" element={<Rooms/>}/>
       <Route path="/admissions" element={<Admissions/>}/>
       <Route path="/payments" element={<Payments/>}/>
+      <Route path="/expenses" element={<Expenses/>}/>
       <Route path="/reports" element={<Reports/>}/>
       <Route path="/settings" element={<SettingsPage/>}/>
       <Route path="/settings/users" element={<OperatorOnly><SettingsPage initialTab="users"/></OperatorOnly>}/>
       <Route path="/settings/audit" element={<OperatorOnly><SettingsPage initialTab="audit"/></OperatorOnly>}/>
     </Route>
     <Route path="*" element={<Navigate to="/" replace/>}/>
-  </Routes>;
+  </Routes></Suspense>;
 }

@@ -107,8 +107,10 @@ class BillingChange(Base):
     billing_period_id: Mapped[UUID] = mapped_column(ForeignKey("billing_periods.id", ondelete="CASCADE"), index=True)
     old_start_date: Mapped[date] = mapped_column(Date)
     old_end_date: Mapped[date] = mapped_column(Date)
+    old_charge_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     new_start_date: Mapped[date] = mapped_column(Date)
     new_end_date: Mapped[date] = mapped_column(Date)
+    new_charge_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     change_type: Mapped[str] = mapped_column(String(32))
     reason: Mapped[str] = mapped_column(Text, default="")
     changed_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
@@ -120,6 +122,7 @@ class Payment(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_payment_amount_positive"),
         CheckConstraint("method IN ('CASH', 'BANK', 'CLICK', 'PAYME', 'OTHER')", name="ck_payment_method"),
+        UniqueConstraint("recorded_by", "idempotency_key", name="uq_payment_actor_idempotency"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -131,11 +134,37 @@ class Payment(Base):
     covered_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     covered_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resident: Mapped[Resident] = relationship(back_populates="payments")
     billing_period: Mapped[BillingPeriod | None] = relationship(back_populates="payments")
     adjustments: Mapped[list[PaymentAdjustment]] = relationship(back_populates="payment", cascade="all, delete-orphan")
+
+
+class Expense(Base):
+    __tablename__ = "expenses"
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="ck_expense_amount_positive"),
+        CheckConstraint("method IN ('CASH', 'BANK', 'CLICK', 'PAYME', 'OTHER')", name="ck_expense_method"),
+        CheckConstraint("category IN ('UTILITIES', 'REPAIR', 'SUPPLIES', 'FOOD', 'SALARY', 'OTHER')", name="ck_expense_category"),
+        UniqueConstraint("recorded_by", "idempotency_key", name="uq_expense_actor_idempotency"),
+        Index("ix_expense_date_voided", "expense_date", "voided_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    expense_date: Mapped[date] = mapped_column(Date, index=True)
+    category: Mapped[str] = mapped_column(String(16))
+    description: Mapped[str] = mapped_column(String(500))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    method: Mapped[str] = mapped_column(String(12))
+    reference: Mapped[str] = mapped_column(String(120), default="")
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    voided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=True)
+    void_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class PaymentAdjustment(Base):

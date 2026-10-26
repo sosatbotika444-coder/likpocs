@@ -1,6 +1,6 @@
-# DormFlow
+# RS Best Hostel
 
-DormFlow is a full-stack dormitory operations app. The React/TypeScript client is in `frontend/`; the FastAPI service, SQLAlchemy models, Alembic migrations, and pytest suite are in `backend/`. PostgreSQL is the persistent database. The interface is Uzbek (Latin) and uses the Uzbekistan time zone by default.
+RS Best Hostel is a full-stack dormitory operations app. The React/TypeScript client is in `frontend/`; the FastAPI service, SQLAlchemy models, Alembic migrations, and pytest suite are in `backend/`. PostgreSQL is the persistent database. The interface is Uzbek (Latin) and uses the Uzbekistan time zone by default.
 
 ## Start the full stack with Docker Compose
 
@@ -90,9 +90,19 @@ python -m app.purge_expired_files --batch-size 100
 
 The purge command logs only aggregate counts. Files in abandoned drafts expire after the configured period; rejected applications are scheduled for deletion after that period; approved application files are scheduled when the linked resident is archived.
 
-## Data exports and optional sample rooms
+## Expenses, scheduled billing, and exports
 
-Authorized users can export resident, room, payment, debt, overdue, and revenue reports to UTF-8 CSV, XLSX, and PDF. Revenue reports accept a custom date range and day/week/month grouping. The optional command `python -m app.seed --demo` creates three sample rooms only; demo residents or payments are never inserted.
+The Uzbek-language **Xarajatlar** screen records dated expenses with a category, payment method, amount, and receipt/reference. Posted entries are never deleted; an operator can void one with a required reason, and both the record and audit trail remain available. Payment and expense writes accept an `Idempotency-Key`; the browser keeps the same key when retrying an unchanged request.
+
+Billing rollover and due reminders run as a daily backend job. Configure the hosting platform's scheduler to run this from the backend service after applying the current Alembic migrations:
+
+```powershell
+python -m app.scheduled_jobs
+```
+
+The command creates due billing periods and per-user reminder rows in one database transaction. Schedule it once daily; rerunning the same day is safe. GET requests do not create billing periods or notifications.
+
+Authorized users can export resident, room, payment, expense, debt, overdue, and revenue reports to UTF-8 CSV, XLSX, and PDF. Revenue reports accept a custom date range and day/week/month grouping. Spreadsheet exports neutralize formula-like text in cells. The optional command `python -m app.seed --demo` creates three sample rooms only; demo residents, payments, and expenses are never inserted.
 
 ## Tests
 
@@ -102,7 +112,7 @@ From `backend/`, run:
 ..\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, private file access, arbitrary billing periods, payment allocation, extensions, and financial corrections. The release database remains PostgreSQL.
+The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, private file access, arbitrary billing periods, payment allocation, extensions, idempotent requests, expense voiding, export safety, and financial corrections. The release database remains PostgreSQL.
 
 ## Production deployment
 

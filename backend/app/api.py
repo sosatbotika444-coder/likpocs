@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from os.path import exists
 from typing import Literal
-from uuid import UUID, NAMESPACE_URL, uuid5
+from uuid import UUID
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from reportlab.lib import colors
@@ -42,6 +43,7 @@ from app.models import (
     BillingChange,
     BillingPeriod,
     Dormitory,
+    Expense,
     Notification,
     Payment,
     PaymentAdjustment,
@@ -57,6 +59,9 @@ from app.schemas import (
     BillingPeriodOut,
     DashboardOut,
     ExtendRequest,
+    ExpenseCreate,
+    ExpenseOut,
+    ExpenseVoid,
     LoginRequest,
     NotificationOut,
     PageInfo,
@@ -80,7 +85,7 @@ from app.schemas import (
     UserUpdate,
 )
 from app.security import create_token_pair, hash_password, verify_password
-from app.services import audit_out, notification_out, payment_out, resident_detail, resident_out, room_out, today_local
+from app.services import audit_out, expense_out, notification_out, payment_out, resident_detail, resident_out, room_out, today_local
 from app.residency import assert_room_available, close_open_period, record_room_assignment
 
 router = APIRouter(prefix="/api")
@@ -91,6 +96,14 @@ STATUS_UZ = {
     "DUE_TODAY": "Bugun to‘lanadi", "OVERDUE": "Muddati o‘tgan",
     "NOT_CONFIGURED": "Davr belgilanmagan",
 }
+EXPENSE_CATEGORY_UZ = {
+    "UTILITIES": "Kommunal xizmatlar", "REPAIR": "Ta'mirlash", "SUPPLIES": "Xo'jalik mollari",
+    "FOOD": "Oziq-ovqat", "SALARY": "Ish haqi", "OTHER": "Boshqa",
+}
+
+
+def natural_room_key(number: str) -> tuple[tuple[int, object], ...]:
+    return tuple((1, int(part)) if part.isdigit() else (0, part.casefold()) for part in re.split(r"(\d+)", number))
 
 
 def page_result(items: list, total: int, skip: int, limit: int) -> PageInfo:
@@ -101,7 +114,8 @@ def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> N
     today = today_local()
     created = False
     for resident in residents:
-        if resident.is_archived or current_period(db, resident.id):
+        resident = db.scalar(select(Resident).where(Resident.id == resident.id).with_for_update())
+        if not resident or resident.is_archived or current_period(db, resident.id):
             continue
         latest = db.scalar(
             select(BillingPeriod)
@@ -112,7 +126,7 @@ def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> N
             new_period = ensure_period(db, resident, actor, as_of=today)
             created = created or bool(new_period and new_period.id != latest.id)
     if created:
-        db.commit()
+        db.flush()
 
 
 def verify_room_capacity(db: Session, room_id: UUID | None, resident_id: UUID | None = None, start_date: date | None = None, end_date: date | None = None) -> Room | None:
@@ -147,9 +161,19 @@ def get_report_rows(
             item = resident_out(db, resident)
             rows.append([item.first_name, item.last_name, item.phone or "", item.telegram_username or "", item.room_number or "", item.check_in_date or "", item.payment_period_days or "", item.billing_end or "", item.agreed_price or 0, item.balance, STATUS_UZ[item.billing_status]])
         return headers, rows
+    if kind == "expenses":
+        start = date_from or date.min
+        end = date_to or date.max
+        expenses = db.scalars(
+            select(Expense).where(Expense.expense_date.between(start, end), Expense.voided_at.is_(None))
+            .order_by(Expense.expense_date.desc(), Expense.created_at.desc())
+        ).all()
+        headers = ["Sana", "Toifa", "Izoh", "Summa (so'm)", "Usul", "Hujjat raqami", "Qayd etdi"]
+        rows = [[item.expense_date, EXPENSE_CATEGORY_UZ[item.category], item.description, item.amount, METHOD_UZ[item.method], item.reference, db.get(User, item.recorded_by).full_name if db.get(User, item.recorded_by) else ""] for item in expenses]
+        return headers, rows
     if kind == "rooms":
         headers = ["Xona", "Qavat", "Sig‘im", "Band", "Bo‘sh o‘rin", "Narx (so‘m)", "Izoh"]
-        rooms = db.scalars(select(Room).where(Room.is_active.is_(True)).order_by(Room.number)).all()
+        rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
         rows = []
         for room in rooms:
             item = room_out(db, room)
@@ -273,7 +297,7 @@ def list_rooms(
     skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db), _: User = Depends(get_current_user),
 ) -> PageInfo:
-    rooms = db.scalars(select(Room).where(Room.is_active.is_(True)).order_by(Room.number)).all()
+    rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
     items = [room_out(db, room) for room in rooms]
     if status_filter == "available":
         items = [room for room in items if room.available_beds > 0]
@@ -288,7 +312,7 @@ def create_room(payload: RoomCreate, db: Session = Depends(get_db), actor: User 
     if payload.dormitory_id and dormitory is None:
         raise HTTPException(status_code=422, detail="Yotoqxona topilmadi.")
     if dormitory is None:
-        dormitory = Dormitory(name="DormFlow", is_default=True, is_active=True)
+        dormitory = Dormitory(name="RS Best Hostel", is_default=True, is_active=True)
         db.add(dormitory)
         db.flush()
     if not dormitory.is_active:
@@ -368,7 +392,6 @@ def list_residents(
     order_col = {"first_name": Resident.first_name, "created_at": Resident.created_at}.get(sort, Resident.last_name)
     query = query.order_by(order_col.desc() if direction == "desc" else order_col.asc())
     records = db.scalars(query).unique().all()
-    ensure_due_periods(db, records, actor)
     items = [resident_out(db, resident) for resident in records]
     if payment_status != "all":
         items = [item for item in items if item.billing_status == payment_status.upper()]
@@ -405,7 +428,7 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), acto
             raise HTTPException(status_code=422, detail="To‘lov davrini belgilash uchun kelishilgan narxni kiriting.")
         create_initial_period(db, resident, start, end, actor)
     audit(db, actor, "RESIDENT_CREATED", "Resident", resident.id, {"name": f"{resident.first_name} {resident.last_name}"})
-    notify(db, "Yangi yashovchi", f"{resident.first_name} {resident.last_name} ro‘yxatga qo‘shildi.", "RESIDENT", resident.id)
+    notify(db, "Yangi yashovchi", f"{resident.first_name} {resident.last_name} ro‘yxatga qo‘shildi.", "RESIDENT", resident.id, actor.id)
     db.commit()
     db.refresh(resident)
     return resident_out(db, resident)
@@ -416,7 +439,6 @@ def get_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User =
     resident = db.scalar(select(Resident).options(joinedload(Resident.room)).where(Resident.id == resident_id))
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
-    ensure_due_periods(db, [resident], actor)
     return resident_detail(db, resident)
 
 
@@ -470,12 +492,11 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
             set_period_dates(db, resident, actor, start, end, days)
         elif old_billing:
             raise HTTPException(status_code=409, detail="To‘lov qaydi bor davrni o‘chirib bo‘lmaydi. Yangi sanalarni belgilang.")
-        if "agreed_price" in values and old_billing and resident.agreed_price is not None:
-            old_billing.charge_amount = resident.agreed_price
     audit(db, actor, "RESIDENT_UPDATED", "Resident", resident.id, {"changed_fields": sorted(values)})
     db.commit()
     db.refresh(resident)
     ensure_due_periods(db, [resident], actor)
+    db.commit()
     return resident_out(db, resident)
 
 
@@ -511,6 +532,7 @@ def restore_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
     audit(db, actor, "RESIDENT_RESTORED", "Resident", resident.id)
     db.commit()
     ensure_due_periods(db, [resident], actor)
+    db.commit()
     return resident_out(db, resident)
 
 
@@ -520,7 +542,7 @@ def extend_resident(resident_id: UUID, payload: ExtendRequest, db: Session = Dep
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
     period = extend_period(db, resident, actor, payload.days, payload.end_date, payload.reason)
-    notify(db, "Yashash muddati uzaytirildi", f"{resident.first_name} {resident.last_name} uchun muddat yangilandi. To‘lov alohida qayd etiladi.", "BILLING", resident.id)
+    notify(db, "Yashash muddati uzaytirildi", f"{resident.first_name} {resident.last_name} uchun muddat yangilandi. To‘lov alohida qayd etiladi.", "BILLING", resident.id, actor.id)
     db.commit()
     db.refresh(period)
     return BillingPeriodOut(**{
@@ -557,41 +579,164 @@ def list_payments(
 
 
 @router.post("/payments", response_model=PaymentOut, status_code=201)
-def create_payment(payload: PaymentCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> PaymentOut:
+def create_payment(
+    payload: PaymentCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+) -> PaymentOut:
+    if idempotency_key is not None and (len(idempotency_key) < 8 or any(not (c.isalnum() or c in "._:-") for c in idempotency_key)):
+        raise HTTPException(status_code=422, detail="Idempotency-Key kamida 8 ta xavfsiz belgidan iborat bo'lishi kerak.")
+    if idempotency_key:
+        previous = db.scalar(select(Payment).options(joinedload(Payment.resident)).where(Payment.recorded_by == actor.id, Payment.idempotency_key == idempotency_key))
+        if previous:
+            same_request = (
+                previous.resident_id == payload.resident_id
+                and previous.amount == payload.amount
+                and previous.payment_date == payload.payment_date
+                and previous.method == payload.method
+                and previous.notes == payload.notes.strip()
+                and (payload.billing_period_id is None or previous.billing_period_id == payload.billing_period_id)
+            )
+            if not same_request:
+                raise HTTPException(status_code=409, detail="Bu kalit boshqa to'lov uchun ishlatilgan.")
+            return payment_out(db, previous)
     if payload.payment_date > today_local():
-        raise HTTPException(status_code=422, detail="To‘lov sanasi kelajakda bo‘lishi mumkin emas.")
-    resident = db.get(Resident, payload.resident_id)
+        raise HTTPException(status_code=422, detail="To'lov sanasi kelajakda bo'lishi mumkin emas.")
+    resident = db.scalar(select(Resident).where(Resident.id == payload.resident_id).with_for_update())
     if not resident or resident.is_archived:
         raise HTTPException(status_code=404, detail="Faol yashovchi topilmadi.")
+    if idempotency_key:
+        previous = db.scalar(select(Payment).options(joinedload(Payment.resident)).where(Payment.recorded_by == actor.id, Payment.idempotency_key == idempotency_key))
+        if previous:
+            if previous.resident_id == payload.resident_id and previous.amount == payload.amount and previous.payment_date == payload.payment_date and previous.method == payload.method and previous.notes == payload.notes.strip() and (payload.billing_period_id is None or previous.billing_period_id == payload.billing_period_id):
+                return payment_out(db, previous)
+            raise HTTPException(status_code=409, detail="Bu kalit boshqa to'lov uchun ishlatilgan.")
     ensure_due_periods(db, [resident], actor)
-    period_id = payload.billing_period_id
-    period = db.scalar(select(BillingPeriod).where(BillingPeriod.id == period_id).with_for_update()) if period_id else current_period(db, resident.id)
-    if not period or period.resident_id != resident.id or period.status != "OPEN":
-        raise HTTPException(status_code=409, detail="Yashovchi uchun ochiq to‘lov davri topilmadi.")
+    if payload.billing_period_id:
+        period_query = select(BillingPeriod).where(BillingPeriod.id == payload.billing_period_id, BillingPeriod.resident_id == resident.id)
+    else:
+        period_query = select(BillingPeriod).where(BillingPeriod.resident_id == resident.id, BillingPeriod.status == "OPEN").order_by(BillingPeriod.start_date.desc())
+    period = db.scalar(period_query.with_for_update())
+    if not period or period.status != "OPEN":
+        raise HTTPException(status_code=409, detail="Yashovchi uchun ochiq to'lov davri topilmadi.")
     balance = period_balance(db, period)
     if balance <= 0:
         raise HTTPException(status_code=409, detail="Bu davr uchun qarzdorlik qolmagan.")
     if payload.amount > balance:
-        raise HTTPException(status_code=422, detail="To‘lov summasi davr qoldig‘idan oshmasligi kerak.")
+        raise HTTPException(status_code=422, detail="To'lov summasi davr qoldig'idan oshmasligi kerak.")
     payment = Payment(
-        resident_id=resident.id,
-        billing_period_id=period.id,
-        amount=payload.amount,
-        payment_date=payload.payment_date,
-        method=payload.method,
-        covered_start=period.start_date,
-        covered_end=period.end_date,
-        notes=payload.notes.strip(),
-        recorded_by=actor.id,
+        resident_id=resident.id, billing_period_id=period.id, amount=payload.amount,
+        payment_date=payload.payment_date, method=payload.method,
+        covered_start=period.start_date, covered_end=period.end_date,
+        notes=payload.notes.strip(), idempotency_key=idempotency_key, recorded_by=actor.id,
     )
     db.add(payment)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            previous = db.scalar(select(Payment).options(joinedload(Payment.resident)).where(Payment.recorded_by == actor.id, Payment.idempotency_key == idempotency_key))
+            if previous and previous.resident_id == payload.resident_id and previous.amount == payload.amount and previous.payment_date == payload.payment_date and previous.method == payload.method and previous.notes == payload.notes.strip() and (payload.billing_period_id is None or previous.billing_period_id == payload.billing_period_id):
+                return payment_out(db, previous)
+        raise HTTPException(status_code=409, detail="To'lov qayta yuborilgan. Ma'lumotni yangilang.") from None
     audit(db, actor, "PAYMENT_RECORDED", "Payment", payment.id, {"resident_id": str(resident.id), "amount": str(payment.amount), "method": payment.method})
-    notify(db, "Yangi to‘lov qayd etildi", f"{resident.first_name} {resident.last_name} uchun {payment.amount} so‘m qabul qilindi.", "PAYMENT", resident.id)
+    notify(db, "Yangi to'lov qayd etildi", f"{resident.first_name} {resident.last_name} uchun {payment.amount} so'm qabul qilindi.", "PAYMENT", resident.id, actor.id)
     mark_paid_and_advance(db, period, actor)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            previous = db.scalar(select(Payment).options(joinedload(Payment.resident)).where(Payment.recorded_by == actor.id, Payment.idempotency_key == idempotency_key))
+            if previous and previous.resident_id == payload.resident_id and previous.amount == payload.amount and previous.payment_date == payload.payment_date and previous.method == payload.method and previous.notes == payload.notes.strip():
+                return payment_out(db, previous)
+        raise HTTPException(status_code=409, detail="To'lov qayta yuborilgan yoki davr qoldig'i o'zgargan. Ma'lumotni yangilang.") from None
     db.refresh(payment)
     return payment_out(db, payment)
+
+
+@router.get("/expenses", response_model=PageInfo)
+def list_expenses(
+    date_from: date | None = None, date_to: date | None = None,
+    include_voided: bool = False, skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+) -> PageInfo:
+    if date_from and date_to and date_to < date_from:
+        raise HTTPException(status_code=422, detail="Yakuniy sana boshlang'ich sanadan oldin bo'lishi mumkin emas.")
+    query = select(Expense).order_by(Expense.expense_date.desc(), Expense.created_at.desc())
+    if date_from:
+        query = query.where(Expense.expense_date >= date_from)
+    if date_to:
+        query = query.where(Expense.expense_date <= date_to)
+    if not include_voided:
+        query = query.where(Expense.voided_at.is_(None))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.scalars(query.offset(skip).limit(limit)).all()
+    return page_result([expense_out(db, row) for row in rows], total, skip, limit)
+
+
+@router.post("/expenses", response_model=ExpenseOut, status_code=201)
+def create_expense(
+    payload: ExpenseCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+) -> ExpenseOut:
+    if idempotency_key is not None and (len(idempotency_key) < 8 or any(not (c.isalnum() or c in "._:-") for c in idempotency_key)):
+        raise HTTPException(status_code=422, detail="Idempotency-Key kamida 8 ta xavfsiz belgidan iborat bo'lishi kerak.")
+    if idempotency_key:
+        previous = db.scalar(select(Expense).where(Expense.recorded_by == actor.id, Expense.idempotency_key == idempotency_key))
+        if previous:
+            same_request = previous.expense_date == payload.expense_date and previous.category == payload.category and previous.description == payload.description.strip() and previous.amount == payload.amount and previous.method == payload.method and previous.reference == payload.reference.strip()
+            if not same_request:
+                raise HTTPException(status_code=409, detail="Bu kalit boshqa xarajat uchun ishlatilgan.")
+            return expense_out(db, previous)
+    if payload.expense_date > today_local():
+        raise HTTPException(status_code=422, detail="Xarajat sanasi kelajakda bo'lishi mumkin emas.")
+    expense = Expense(
+        expense_date=payload.expense_date, category=payload.category,
+        description=payload.description.strip(), amount=payload.amount,
+        method=payload.method, reference=payload.reference.strip(),
+        idempotency_key=idempotency_key, recorded_by=actor.id,
+    )
+    db.add(expense)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            previous = db.scalar(select(Expense).where(Expense.recorded_by == actor.id, Expense.idempotency_key == idempotency_key))
+            if previous and previous.expense_date == payload.expense_date and previous.category == payload.category and previous.description == payload.description.strip() and previous.amount == payload.amount and previous.method == payload.method and previous.reference == payload.reference.strip():
+                return expense_out(db, previous)
+        raise HTTPException(status_code=409, detail="Xarajat qayta yuborilgan. Ma'lumotni yangilang.") from None
+    audit(db, actor, "EXPENSE_RECORDED", "Expense", expense.id, {"category": expense.category, "amount": str(expense.amount), "method": expense.method})
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key:
+            previous = db.scalar(select(Expense).where(Expense.recorded_by == actor.id, Expense.idempotency_key == idempotency_key))
+            if previous and previous.expense_date == payload.expense_date and previous.category == payload.category and previous.description == payload.description.strip() and previous.amount == payload.amount and previous.method == payload.method and previous.reference == payload.reference.strip():
+                return expense_out(db, previous)
+        raise HTTPException(status_code=409, detail="Xarajat qayta yuborilgan. Ma'lumotni yangilang.") from None
+    db.refresh(expense)
+    return expense_out(db, expense)
+
+
+@router.post("/expenses/{expense_id}/void", response_model=ExpenseOut)
+def void_expense(expense_id: UUID, payload: ExpenseVoid, db: Session = Depends(get_db), actor: User = Depends(require_operator)) -> ExpenseOut:
+    expense = db.scalar(select(Expense).where(Expense.id == expense_id).with_for_update())
+    if not expense:
+        raise HTTPException(status_code=404, detail="Xarajat topilmadi.")
+    if expense.voided_at:
+        raise HTTPException(status_code=409, detail="Xarajat avval bekor qilingan.")
+    expense.voided_at = datetime.now(UTC)
+    expense.voided_by = actor.id
+    expense.void_reason = payload.reason.strip()
+    audit(db, actor, "EXPENSE_VOIDED", "Expense", expense.id, {"amount": str(expense.amount), "reason": expense.void_reason})
+    db.commit()
+    db.refresh(expense)
+    return expense_out(db, expense)
 
 
 @router.post("/payments/{payment_id}/adjustments", response_model=PaymentAdjustmentOut, status_code=201)
@@ -633,17 +778,18 @@ def list_adjustments(payment_id: UUID, db: Session = Depends(get_db), _: User = 
 def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> DashboardOut:
     today = today_local()
     residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
-    ensure_due_periods(db, residents, actor)
-    active_rooms = db.scalars(select(Room).where(Room.is_active.is_(True)).order_by(Room.number)).all()
+    active_rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
     items = [resident_out(db, item, today) for item in residents]
     capacity = sum(room.capacity for room in active_rooms)
-    assigned = sum(1 for item in residents if item.room_id is not None)
     room_stats = [room_out(db, room) for room in active_rooms]
+    assigned = sum(item.resident_count for item in room_stats)
     month_start = today.replace(day=1)
     first_trend_index = month_start.year * 12 + month_start.month - 1 - 5
     first_trend_month = date(first_trend_index // 12, first_trend_index % 12 + 1, 1)
     payments = db.scalars(select(Payment).options(joinedload(Payment.resident)).where(Payment.payment_date >= first_trend_month).order_by(Payment.payment_date)).all()
     month_income = sum((net_payment(db, item) for item in payments if item.payment_date >= month_start), Decimal("0"))
+    expenses = db.scalars(select(Expense).where(Expense.expense_date >= month_start, Expense.voided_at.is_(None))).all()
+    month_expenses = sum((item.amount for item in expenses), Decimal("0"))
     open_periods = db.scalars(
         select(BillingPeriod).join(Resident, BillingPeriod.resident_id == Resident.id).where(
             BillingPeriod.status == "OPEN", Resident.is_archived.is_(False)
@@ -664,7 +810,8 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
         residents=len(residents), rooms=len(active_rooms), occupancy_rate=round(assigned / capacity * 100, 1) if capacity else 0,
         available_beds=max(0, capacity - assigned), due_today=sum(x.billing_status == "DUE_TODAY" for x in items),
         due_soon=sum(x.billing_status == "DUE_SOON" for x in items), overdue=sum(x.billing_status == "OVERDUE" for x in items),
-        actual_revenue=month_income, expected_payments=expected, outstanding_debt=outstanding,
+        actual_revenue=month_income, actual_expenses=month_expenses, net_cash_flow=month_income - month_expenses,
+        expected_payments=expected, outstanding_debt=outstanding,
         revenue_trend=trend,
         occupancy_by_room=[{"room": item.number, "occupied": item.resident_count, "available": item.available_beds} for item in room_stats],
         recent_payments=[payment_out(db, item) for item in recent],
@@ -674,33 +821,16 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
 
 @router.get("/notifications", response_model=list[NotificationOut])
 def list_notifications(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> list[NotificationOut]:
-    today = today_local()
-    residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
-    ensure_due_periods(db, residents, actor)
-    now = datetime.now(UTC)
-    created = False
-    for resident in residents:
-        state = resident_out(db, resident, today)
-        if state.billing_status not in {"DUE_TODAY", "DUE_SOON", "OVERDUE"}:
-            continue
-        title = {"DUE_TODAY": "To‘lov bugun", "DUE_SOON": "To‘lov muddati yaqin", "OVERDUE": "To‘lov muddati o‘tgan"}[state.billing_status]
-        delta = state.overdue_days if state.billing_status == "OVERDUE" else ((state.billing_end - today).days if state.billing_end else 0)
-        msg = f"{state.first_name} {state.last_name} · {state.room_number or 'Xona yo‘q'}-xona · {state.balance} so‘m"
-        if state.billing_status == "OVERDUE":
-            msg += f" · {delta} kun kechikdi"
-        nid = uuid5(NAMESPACE_URL, f"dormflow:due:{today.isoformat()}:{resident.id}")
-        if not db.get(Notification, nid):
-            db.add(Notification(id=nid, title=title, message=msg, kind=state.billing_status, entity_id=resident.id, read_at=None, created_at=now))
-            created = True
-    if created:
-        db.commit()
-    stored = db.scalars(select(Notification).where(Notification.read_at.is_(None)).order_by(Notification.created_at.desc()).limit(50)).all()
+    stored = db.scalars(
+        select(Notification).where(Notification.user_id == actor.id, Notification.read_at.is_(None))
+        .order_by(Notification.created_at.desc()).limit(50)
+    ).all()
     return [notification_out(item) for item in stored]
 
 
 @router.post("/notifications/read-all", status_code=204)
-def mark_notifications_read(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> Response:
-    rows = db.scalars(select(Notification).where(Notification.read_at.is_(None))).all()
+def mark_notifications_read(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> Response:
+    rows = db.scalars(select(Notification).where(Notification.user_id == actor.id, Notification.read_at.is_(None))).all()
     now = datetime.now(UTC)
     for row in rows:
         row.read_at = now
@@ -711,7 +841,7 @@ def mark_notifications_read(db: Session = Depends(get_db), _: User = Depends(get
 @router.get("/settings", response_model=SystemSettingsOut)
 def get_settings(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> SystemSettingsOut:
     record = db.get(SystemSetting, "general")
-    value = record.value if record else {"dorm_name": "DormFlow", "default_period_days": 30, "currency": "UZS"}
+    value = record.value if record else {"dorm_name": "RS Best Hostel", "default_period_days": 30, "currency": "UZS"}
     return SystemSettingsOut(**value, updated_at=record.updated_at if record else None, billing_change_allowed=settings.admins_can_adjust_billing)
 
 
@@ -740,6 +870,12 @@ def list_audit(
     return page_result([audit_out(db, item) for item in rows], total, skip, limit)
 
 
+def spreadsheet_safe(value: object) -> object:
+    if isinstance(value, str) and (value[:1] in ("\t", "\r", "\n") or value.lstrip()[:1] in ("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def xlsx_file(headers: list[str], rows: list[list[object]], sheet_name: str) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -750,7 +886,7 @@ def xlsx_file(headers: list[str], rows: list[list[object]], sheet_name: str) -> 
         cell.fill = PatternFill("solid", fgColor="255744")
         cell.alignment = Alignment(vertical="center")
     for row in rows:
-        sheet.append([str(value) if isinstance(value, (date, datetime)) else value for value in row])
+        sheet.append([str(value) if isinstance(value, (date, datetime)) else spreadsheet_safe(value) for value in row])
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for column in sheet.columns:
@@ -768,9 +904,9 @@ def pdf_file(headers: list[str], rows: list[list[object]], title: str) -> bytes:
     font_paths = ["C:/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     try:
         font_path = next(path for path in font_paths if exists(path))
-        pdfmetrics.registerFont(TTFont("DormFlow", font_path))
-        styles["Normal"].fontName = "DormFlow"
-        styles["Title"].fontName = "DormFlow"
+        pdfmetrics.registerFont(TTFont("RS Best Hostel", font_path))
+        styles["Normal"].fontName = "RS Best Hostel"
+        styles["Title"].fontName = "RS Best Hostel"
     except Exception:
         pass
     content = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
@@ -780,7 +916,7 @@ def pdf_file(headers: list[str], rows: list[list[object]], title: str) -> bytes:
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#255744")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, -1), "DormFlow" if "DormFlow" in pdfmetrics.getRegisteredFontNames() else "Helvetica"),
+        ("FONTNAME", (0, 0), (-1, -1), "RS Best Hostel" if "RS Best Hostel" in pdfmetrics.getRegisteredFontNames() else "Helvetica"),
         ("FONTSIZE", (0, 0), (-1, -1), 7),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDE4DD")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F7F3")]),
@@ -795,7 +931,7 @@ def pdf_file(headers: list[str], rows: list[list[object]], title: str) -> bytes:
 
 @router.get("/reports/{kind}.{file_format}")
 def export_report(
-    kind: Literal["residents", "rooms", "payments", "debts", "overdue", "revenue"],
+    kind: Literal["residents", "rooms", "payments", "debts", "overdue", "revenue", "expenses"],
     file_format: Literal["csv", "xlsx", "pdf"],
     date_from: date | None = None, date_to: date | None = None,
     interval: Literal["day", "week", "month"] = "month",
@@ -803,25 +939,22 @@ def export_report(
 ) -> Response:
     if date_from and date_to and date_to < date_from:
         raise HTTPException(status_code=422, detail="Yakuniy sana boshlang‘ich sanadan oldin bo‘lishi mumkin emas.")
-    if kind in {"residents", "debts", "overdue"}:
-        residents = db.scalars(select(Resident).where(Resident.is_archived.is_(False))).all()
-        ensure_due_periods(db, residents, actor)
     headers, rows = get_report_rows(db, kind, date_from, date_to, interval)
-    name = f"dormflow-{kind}-{today_local().isoformat()}"
+    name = f"rs-best-hostel-{kind}-{today_local().isoformat()}"
     if file_format == "csv":
         text_stream = io.StringIO(newline="")
         writer = csv.writer(text_stream)
         writer.writerow(headers)
-        writer.writerows(rows)
+        writer.writerows([[spreadsheet_safe(value) for value in row] for row in rows])
         content = ("\ufeff" + text_stream.getvalue()).encode("utf-8")
         return Response(content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
     if file_format == "xlsx":
-        sheet_names = {"residents": "Yashovchilar", "rooms": "Xonalar", "payments": "To‘lovlar", "debts": "Qarzdorlik", "overdue": "Muddati o‘tgan", "revenue": "Tushum"}
+        sheet_names = {"residents": "Yashovchilar", "rooms": "Xonalar", "payments": "To‘lovlar", "debts": "Qarzdorlik", "overdue": "Muddati o‘tgan", "revenue": "Tushum", "expenses": "Xarajatlar"}
         content = xlsx_file(headers, rows, sheet_names[kind])
         media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
-        pdf_titles = {"residents": "Yashovchilar", "rooms": "Xonalar bandligi", "payments": "To‘lovlar tarixi", "debts": "Qarzdorliklar", "overdue": "Muddati o‘tgan to‘lovlar", "revenue": "Haqiqiy tushum"}
-        content = pdf_file(headers, rows, f"DormFlow — {pdf_titles[kind]}")
+        pdf_titles = {"residents": "Yashovchilar", "rooms": "Xonalar bandligi", "payments": "To‘lovlar tarixi", "debts": "Qarzdorliklar", "overdue": "Muddati o‘tgan to‘lovlar", "revenue": "Haqiqiy tushum", "expenses": "Xarajatlar"}
+        content = pdf_file(headers, rows, f"RS Best Hostel — {pdf_titles[kind]}")
         media = "application/pdf"
     extension = "xlsx" if file_format == "xlsx" else "pdf"
     return Response(content, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}.{extension}"'})

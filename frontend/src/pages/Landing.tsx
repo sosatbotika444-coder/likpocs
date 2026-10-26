@@ -19,10 +19,10 @@ const previewItems = [
 
 function DashboardPreview() {
   return (
-    <div className="landing-preview-wrap" id="dashboard-preview" aria-label="DormFlow boshqaruv panelining namuna ko‘rinishi">
+    <div className="landing-preview-wrap" id="dashboard-preview" aria-label="RS Best Hostel boshqaruv panelining namuna ko‘rinishi">
       <div className="landing-preview">
         <header className="preview-topbar">
-          <div className="preview-brand"><span><HomeOutlined /></span><strong>dorm<span>flow</span></strong></div>
+          <div className="preview-brand"><span><HomeOutlined /></span><strong>RS <span>Best Hostel</span></strong></div>
           <div className="preview-search"><SearchOutlined /><span>Qidirish</span><kbd>⌘ K</kbd></div>
           <div className="preview-top-actions"><span className="preview-demo-label">DEMO KO‘RINISH</span><BellOutlined /><span className="preview-avatar">DF</span></div>
         </header>
@@ -81,7 +81,7 @@ export default function Landing() {
       </video>
       <div className="landing-wash" />
       <nav className="landing-nav" aria-label="Asosiy navigatsiya">
-        <Link className="landing-brand" to="/" aria-label="DormFlow bosh sahifa"><span className="landing-brand-symbol"><HomeOutlined /></span><span>dorm<span>flow</span></span></Link>
+        <Link className="landing-brand" to="/" aria-label="RS Best Hostel bosh sahifa"><span className="landing-brand-symbol"><HomeOutlined /></span><span>RS <span>Best Hostel</span></span></Link>
         <div className="landing-nav-links">
           <Link to="/app">Boshqaruv</Link>
           <Link to="/rooms">Xonalar</Link>

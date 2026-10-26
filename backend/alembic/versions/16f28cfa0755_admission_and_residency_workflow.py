@@ -33,7 +33,7 @@ def upgrade() -> None:
     if isinstance(current_setting, str):
         current_setting = json.loads(current_setting)
     dormitory_id = uuid4()
-    dormitory_name = (current_setting or {}).get("dorm_name", "DormFlow")
+    dormitory_name = (current_setting or {}).get("dorm_name", "RS Best Hostel")
     op.bulk_insert(
         sa.table(
             "dormitories",

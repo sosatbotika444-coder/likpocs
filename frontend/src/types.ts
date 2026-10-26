@@ -16,8 +16,8 @@ export type BillingPeriod = {
   charge_amount: number; paid_amount: number; balance: number; status: string;
 };
 export type BillingChange = {
-  id: string; billing_period_id: string; old_start_date: string; old_end_date: string;
-  new_start_date: string; new_end_date: string; change_type: string; reason: string; created_at: string;
+  id: string; billing_period_id: string; old_start_date: string; old_end_date: string; old_charge_amount: number | string | null;
+  new_start_date: string; new_end_date: string; new_charge_amount: number | string | null; change_type: string; reason: string; created_at: string;
 };
 export type ResidentDetail = Resident & { billing_history: BillingPeriod[]; changes: BillingChange[] };
 export type Payment = {
@@ -27,10 +27,19 @@ export type Payment = {
   recorded_by: string; recorded_by_name: string; created_at: string;
 };
 export type Notification = { id: string; title: string; message: string; kind: string; entity_id: string | null; read_at: string | null; created_at: string };
+
+export type ExpenseCategory = 'UTILITIES' | 'REPAIR' | 'SUPPLIES' | 'FOOD' | 'SALARY' | 'OTHER';
+export type Expense = {
+  id: string; expense_date: string; category: ExpenseCategory; description: string;
+  amount: number; method: string; reference: string; recorded_by: string;
+  recorded_by_name: string; voided_at: string | null; voided_by: string | null;
+  void_reason: string; created_at: string;
+};
+
 export type Page<T> = { items: T[]; total: number; skip: number; limit: number };
 export type Dashboard = {
   residents: number; rooms: number; occupancy_rate: number; available_beds: number;
-  due_today: number; due_soon: number; overdue: number; actual_revenue: number;
+  due_today: number; due_soon: number; overdue: number; actual_revenue: number; actual_expenses: number; net_cash_flow: number;
   expected_payments: number; outstanding_debt: number;
   revenue_trend: { month: string; amount: number }[];
   occupancy_by_room: { room: string; occupied: number; available: number }[];

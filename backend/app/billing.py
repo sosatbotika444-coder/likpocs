@@ -99,7 +99,7 @@ def extend_period(
     period = current_period(db, resident.id)
     if not period:
         raise HTTPException(status_code=409, detail="Yashovchida ochiq to‘lov davri yo‘q.")
-    old_start, old_end = period.start_date, period.end_date
+    old_start, old_end, old_charge = period.start_date, period.end_date, period.charge_amount
     if end_date is not None:
         new_end = end_date
         added_days = (new_end - old_end).days
@@ -120,8 +120,10 @@ def extend_period(
         billing_period_id=period.id,
         old_start_date=old_start,
         old_end_date=old_end,
+        old_charge_amount=old_charge,
         new_start_date=period.start_date,
         new_end_date=new_end,
+        new_charge_amount=period.charge_amount,
         change_type="EXTENSION",
         reason=reason,
         changed_by=actor.id,
@@ -139,25 +141,37 @@ def set_period_dates(
         raise HTTPException(status_code=422, detail="Davr tugashi boshlanishidan keyin bo‘lishi kerak.")
     period = current_period(db, resident.id)
     if period:
-        old_start, old_end = period.start_date, period.end_date
+        old_start, old_end, old_charge = period.start_date, period.end_date, period.charge_amount
+        new_charge = resident.agreed_price or ZERO
         if period_paid(db, period.id) > 0 and start < old_start:
-            raise HTTPException(status_code=409, detail="To‘lov qayd etilgan davrning boshlanishini oldingi sanaga surib bo‘lmaydi.")
+            raise HTTPException(status_code=409, detail="To'lov qayd etilgan davrning boshlanishini oldingi sanaga surib bo'lmaydi.")
+        dates_changed = old_start != start or old_end != end
+        amount_changed = old_charge != new_charge
         period.start_date = start
         period.end_date = end
         period.period_days = (end - start).days
-        period.charge_amount = resident.agreed_price or ZERO
-        db.add(BillingChange(
-            resident_id=resident.id,
-            billing_period_id=period.id,
-            old_start_date=old_start,
-            old_end_date=old_end,
-            new_start_date=start,
-            new_end_date=end,
-            change_type="SCHEDULE_CHANGE",
-            reason="To‘lov jadvali tahrirlandi",
-            changed_by=actor.id,
-        ))
-        audit(db, actor, "BILLING_SCHEDULE_CHANGED", "BillingPeriod", period.id, {"old_end": old_end.isoformat(), "new_end": end.isoformat()})
+        period.charge_amount = new_charge
+        if dates_changed or amount_changed:
+            is_price_only = amount_changed and not dates_changed
+            db.add(BillingChange(
+                resident_id=resident.id,
+                billing_period_id=period.id,
+                old_start_date=old_start,
+                old_end_date=old_end,
+                old_charge_amount=old_charge,
+                new_start_date=start,
+                new_end_date=end,
+                new_charge_amount=new_charge,
+                change_type="PRICE_CHANGE" if is_price_only else "SCHEDULE_CHANGE",
+                reason="Kelishilgan narx o'zgartirildi" if is_price_only else "To'lov jadvali tahrirlandi",
+                changed_by=actor.id,
+            ))
+            action = "BILLING_PRICE_CHANGED" if is_price_only else "BILLING_SCHEDULE_CHANGED"
+            audit(db, actor, action, "BillingPeriod", period.id, {
+                "old_start": old_start.isoformat(), "old_end": old_end.isoformat(),
+                "new_start": start.isoformat(), "new_end": end.isoformat(),
+                "old_amount": str(old_charge), "new_amount": str(new_charge),
+            })
     else:
         period = create_initial_period(db, resident, start, end, actor)
         audit(db, actor, "BILLING_PERIOD_CREATED", "BillingPeriod", period.id)

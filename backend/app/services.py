@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.billing import current_period, period_balance, period_paid
 from app.config import settings
-from app.models import AuditEvent, BillingChange, BillingPeriod, Notification, Payment, PaymentAdjustment, Resident, ResidencePeriod, Room, User
-from app.schemas import AuditEventOut, BillingChangeOut, BillingPeriodOut, NotificationOut, PaymentOut, ResidentDetail, ResidentOut, RoomOut
+from app.models import AuditEvent, BillingChange, BillingPeriod, Expense, Notification, Payment, PaymentAdjustment, Resident, ResidencePeriod, Room, User
+from app.schemas import AuditEventOut, BillingChangeOut, BillingPeriodOut, ExpenseOut, NotificationOut, PaymentOut, ResidentDetail, ResidentOut, RoomOut
 
 
 def today_local() -> date:
@@ -167,6 +167,25 @@ def payment_out(db: Session, payment: Payment) -> PaymentOut:
 
 def notification_out(item: Notification) -> NotificationOut:
     return NotificationOut.model_validate(item)
+
+
+def expense_out(db: Session, expense: Expense) -> ExpenseOut:
+    recorder = db.get(User, expense.recorded_by)
+    return ExpenseOut(
+        id=expense.id,
+        expense_date=expense.expense_date,
+        category=expense.category,
+        description=expense.description,
+        amount=expense.amount,
+        method=expense.method,
+        reference=expense.reference,
+        recorded_by=expense.recorded_by,
+        recorded_by_name=recorder.full_name if recorder else "",
+        voided_at=expense.voided_at,
+        voided_by=expense.voided_by,
+        void_reason=expense.void_reason,
+        created_at=expense.created_at,
+    )
 
 
 def audit_out(db: Session, event: AuditEvent) -> AuditEventOut:

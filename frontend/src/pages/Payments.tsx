@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Table, Tag, notification } from 'antd';
 import { api, errorMessage } from '../api';
 import type { Page, Payment, Resident } from '../types';
-import { formatDate, formatMoney, todayUzbekistan } from '../locales/uz';
+import { formatDate, formatMoney, isPositiveMoney, sumMoney, todayUzbekistan } from '../locales/uz';
 import { useAuth } from '../auth';
 import { Actions, PageHeading } from './shared';
 
-type PaymentForm = { resident_id: string; amount: number; payment_date: string; method: string; notes?: string };
+type PaymentForm = { resident_id: string; amount: string; payment_date: string; method: string; notes?: string };
 
 export default function Payments() {
   const { user } = useAuth();
@@ -22,6 +22,7 @@ export default function Payments() {
   const [adjustForm] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [total, setTotal] = useState(0);
+  const paymentKey = useRef<string | null>(null);
 
   const load = async () => {
     setLoading(true); setError('');
@@ -36,8 +37,11 @@ export default function Payments() {
 
   const save = async (values: PaymentForm) => {
     setSaving(true);
-    try { await api.post('/payments', values); notice.success({message:'To‘lov qayd etildi.'}); setEditor(false); form.resetFields(); await load(); }
-    catch (e) { notice.error({message:'To‘lovni qayd etib bo‘lmadi',description:errorMessage(e)}); }
+    try {
+      paymentKey.current ??= crypto.randomUUID();
+      await api.post('/payments', values, { headers: { 'Idempotency-Key': paymentKey.current } });
+      paymentKey.current = null; notice.success({message:'To‘lov qayd etildi.'}); setEditor(false); form.resetFields(); await load();
+    } catch (e) { notice.error({message:'To‘lovni qayd etib bo‘lmadi',description:errorMessage(e)}); }
     finally { setSaving(false); }
   };
   const adjust = async (values: {amount_delta:number;reason:string}) => {
@@ -58,15 +62,15 @@ export default function Payments() {
     ...(user?.role==='OPERATOR'?[{title:'',align:'right' as const,render:(_:unknown,r:Payment)=><Actions><Button type="link" onClick={()=>{setAdjusting(r);adjustForm.resetFields();}}>Tuzatish</Button></Actions>}]:[]),
   ],[user?.role]);
 
-  const eligible = residents.filter((r)=>r.billing_status!=='NOT_CONFIGURED' && r.balance>0);
+  const eligible = residents.filter((r)=>r.billing_status!=='NOT_CONFIGURED' && isPositiveMoney(r.balance));
   return <div className="page-stack">{holder}
     <PageHeading eyebrow="MOLIYA" title="To‘lovlar" subtitle="Haqiqiy tushumlar va qaydlar tarixi." action="To‘lov qayd etish" onAction={()=>{form.setFieldsValue({payment_date:todayUzbekistan(),method:'CASH'});setEditor(true);}}/>
-    <div className="summary-strip"><span>Ko‘rsatilgan qaydlar <strong>{total}</strong></span><span>Haqiqiy tushum <strong>{formatMoney(rows.reduce((sum,p)=>sum+p.net_amount,0))}</strong></span><span>Bu hisobot davrida</span></div>
+    <div className="summary-strip"><span>Ko‘rsatilgan qaydlar <strong>{total}</strong></span><span>Haqiqiy tushum <strong>{formatMoney(sumMoney(rows.map((payment) => payment.net_amount)))}</strong></span><span>Bu hisobot davrida</span></div>
     {error&&<Alert type="error" showIcon message="To‘lovlarni yuklab bo‘lmadi" description={error} action={<Button onClick={()=>void load()}>Qayta yuklash</Button>}/>}
     <div className="toolbar panel"><span className="toolbar-label">Davr</span><DatePicker.RangePicker format="DD.MM.YYYY" onChange={(v)=>setRange([v?.[0]?.format('YYYY-MM-DD'),v?.[1]?.format('YYYY-MM-DD')])}/><Button type="link" onClick={()=>setRange([undefined,undefined])}>Filtrni tozalash</Button></div>
     <div className="panel table-panel"><Table rowKey="id" loading={loading} columns={columns} dataSource={rows} scroll={{x:950}} pagination={{pageSize:15,showTotal:(n)=>`Jami ${n} ta`}} locale={{emptyText:'Tanlangan davrda to‘lovlar yo‘q'}}/></div>
     <Modal open={editor} title="Yangi to‘lov" onCancel={()=>setEditor(false)} onOk={()=>form.submit()} confirmLoading={saving} okText="To‘lovni saqlash" cancelText="Bekor qilish" destroyOnClose>
-      <Form form={form} layout="vertical" onFinish={save}><Form.Item name="resident_id" label="Yashovchi" rules={[{required:true,message:'Yashovchini tanlang.'}]}><Select showSearch optionFilterProp="label" placeholder="Qarzdorligi bor yashovchini tanlang" options={eligible.map((r)=>({value:r.id,label:`${r.first_name} ${r.last_name} · ${r.room_number||'Xona yo‘q'} · ${formatMoney(r.balance)}`}))}/></Form.Item><Form.Item name="amount" label="Summa (so‘m)" rules={[{required:true,message:'Summani kiriting.'}]}><InputNumber min={1} controls={false} className="full-width"/></Form.Item><div className="form-grid"><Form.Item name="payment_date" label="To‘lov sanasi" rules={[{required:true,message:'Sanani tanlang.'}]}><Input type="date"/></Form.Item><Form.Item name="method" label="To‘lov usuli" rules={[{required:true,message:'Usulni tanlang.'}]}><Select options={[{value:'CASH',label:'Naqd pul'},{value:'BANK',label:'Bank o‘tkazmasi'},{value:'CLICK',label:'Click'},{value:'PAYME',label:'Payme'},{value:'OTHER',label:'Boshqa'}]}/></Form.Item></div><Form.Item name="notes" label="Izoh"><Input.TextArea rows={2}/></Form.Item></Form>
+      <Form form={form} layout="vertical" onValuesChange={() => { paymentKey.current = null; }} onFinish={save}><Form.Item name="resident_id" label="Yashovchi" rules={[{required:true,message:'Yashovchini tanlang.'}]}><Select showSearch optionFilterProp="label" placeholder="Qarzdorligi bor yashovchini tanlang" options={eligible.map((r)=>({value:r.id,label:`${r.first_name} ${r.last_name} · ${r.room_number||'Xona yo‘q'} · ${formatMoney(r.balance)}`}))}/></Form.Item><Form.Item name="amount" label="Summa (so‘m)" rules={[{required:true,message:'Summani kiriting.'}]}><InputNumber<string> stringMode min="0.01" precision={2} controls={false} className="full-width"/></Form.Item><div className="form-grid"><Form.Item name="payment_date" label="To‘lov sanasi" rules={[{required:true,message:'Sanani tanlang.'}]}><Input type="date"/></Form.Item><Form.Item name="method" label="To‘lov usuli" rules={[{required:true,message:'Usulni tanlang.'}]}><Select options={[{value:'CASH',label:'Naqd pul'},{value:'BANK',label:'Bank o‘tkazmasi'},{value:'CLICK',label:'Click'},{value:'PAYME',label:'Payme'},{value:'OTHER',label:'Boshqa'}]}/></Form.Item></div><Form.Item name="notes" label="Izoh"><Input.TextArea rows={2}/></Form.Item></Form>
       {!eligible.length&&<Alert type="warning" showIcon message="To‘lov davri va qarzdorligi sozlangan yashovchi topilmadi."/>}
     </Modal>
     <Modal open={Boolean(adjusting)} title="To‘lovni tuzatish" onCancel={()=>setAdjusting(null)} onOk={()=>adjustForm.submit()} confirmLoading={saving} okText="Tuzatishni qayd etish" cancelText="Bekor qilish" destroyOnClose>

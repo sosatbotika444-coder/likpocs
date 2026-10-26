@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "DormFlow API"
+    app_name: str = "RS Best Hostel API"
     environment: str = "development"
     database_url: str = "postgresql+psycopg://dormflow:dormflow@localhost:5432/dormflow"
     jwt_secret: str = "replace-this-secret-before-release"

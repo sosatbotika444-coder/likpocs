@@ -26,8 +26,8 @@ def audit(
     return event
 
 
-def notify(db: Session, title: str, message: str, kind: str = "INFO", entity_id: UUID | None = None) -> Notification:
-    item = Notification(title=title, message=message, kind=kind, entity_id=entity_id)
+def notify(db: Session, title: str, message: str, kind: str = "INFO", entity_id: UUID | None = None, user_id: UUID | None = None) -> Notification:
+    item = Notification(title=title, message=message, kind=kind, entity_id=entity_id, user_id=user_id)
     db.add(item)
     return item
 

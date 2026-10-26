@@ -11,6 +11,7 @@ const reportTypes = [
   {key:'debts',title:'Qarzdorliklar',detail:'Ochiq to‘lov davri va qolgan qarzlar.'},
   {key:'overdue',title:'Muddati o‘tgan to‘lovlar',detail:'Muddati o‘tgan davrlar va kechikish kunlari.'},
   {key:'revenue',title:'Haqiqiy tushum',detail:'Kunlik, haftalik yoki oylik amaldagi tushum.'},
+  {key:'expenses',title:'Xarajatlar',detail:'Sana oralig‘idagi xarajatlar, toifalar va to‘lov usullari.'},
 ];
 
 export default function Reports() {
@@ -24,7 +25,7 @@ export default function Reports() {
     try {
       const response = await api.get(`/reports/${kind}.${format}`, {params:{date_from:dates[0],date_to:dates[1],interval},responseType:'blob'});
       const url = URL.createObjectURL(response.data);
-      const link = document.createElement('a'); link.href=url; link.download=`dormflow-${kind}-${new Date().toISOString().slice(0,10)}.${format}`; link.click(); URL.revokeObjectURL(url);
+      const link = document.createElement('a'); link.href=url; link.download=`rs-best-hostel-${kind}-${new Date().toISOString().slice(0,10)}.${format}`; link.click(); URL.revokeObjectURL(url);
       notice.success({message:'Hisobot yuklab olindi.'});
     } catch (e) { setError(errorMessage(e)); notice.error({message:'Hisobotni yaratib bo‘lmadi',description:errorMessage(e)}); }
     finally { setBusy(''); }

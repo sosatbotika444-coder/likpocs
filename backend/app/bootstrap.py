@@ -24,9 +24,9 @@ def bootstrap(db: Session) -> None:
         db.flush()
         audit(db, operator, "OPERATOR_BOOTSTRAPPED", "User", operator.id)
     if not db.get(SystemSetting, "general"):
-        db.add(SystemSetting(key="general", value={"dorm_name": "DormFlow", "default_period_days": 30, "currency": "UZS"}, updated_by=operator.id))
+        db.add(SystemSetting(key="general", value={"dorm_name": "RS Best Hostel", "default_period_days": 30, "currency": "UZS"}, updated_by=operator.id))
     if not db.scalar(select(Dormitory).where(Dormitory.is_default.is_(True))):
         general = db.get(SystemSetting, "general")
-        dormitory_name = (general.value.get("dorm_name") if general else None) or "DormFlow"
+        dormitory_name = (general.value.get("dorm_name") if general else None) or "RS Best Hostel"
         db.add(Dormitory(name=dormitory_name, is_default=True, is_active=True))
     db.commit()

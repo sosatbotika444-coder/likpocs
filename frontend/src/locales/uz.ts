@@ -1,8 +1,8 @@
 export const uz = {
-  brand: { name: 'DormFlow', subtitle: 'turar joy boshqaruvi' },
+  brand: { name: 'RS Best Hostel', subtitle: 'yotoqxona boshqaruvi' },
   nav: {
     dashboard: 'Boshqaruv paneli', residents: 'Yashovchilar', rooms: 'Xonalar',
-    payments: 'To‘lovlar', reports: 'Hisobotlar', settings: 'Sozlamalar',
+    payments: 'To‘lovlar', expenses: 'Xarajatlar', reports: 'Hisobotlar', settings: 'Sozlamalar',
     users: 'Foydalanuvchilar', audit: 'Faollik jurnali',
     admissions: 'Qabul',
   },
@@ -34,7 +34,7 @@ export const uz = {
   },
   login: {
     eyebrow: 'YOTOQXONA BOSHQARUVI', title: 'Ishlaringiz maromida.',
-    subtitle: 'DormFlow hisobingizga kiring.', email: 'Elektron pochta',
+    subtitle: 'RS Best Hostel hisobingizga kiring.', email: 'Elektron pochta',
     password: 'Parol', submit: 'Tizimga kirish', security: 'Xavfsiz boshqaruv muhiti',
   },
   dashboard: {
@@ -54,16 +54,16 @@ export const uz = {
       RESIDENT_CREATED: 'Yashovchi qo‘shildi', RESIDENT_UPDATED: 'Yashovchi ma’lumoti yangilandi',
       RESIDENT_ARCHIVED: 'Yashovchi arxivlandi', RESIDENT_RESTORED: 'Yashovchi tiklandi',
       BILLING_CYCLE_CREATED: 'To‘lov davri yaratildi', BILLING_PERIOD_CREATED: 'To‘lov jadvali sozlandi',
-      BILLING_SCHEDULE_CHANGED: 'To‘lov jadvali o‘zgartirildi', BILLING_EXTENDED: 'Yashash muddati uzaytirildi',
-      PAYMENT_RECORDED: 'To‘lov qayd etildi', PAYMENT_ADJUSTED: 'To‘lovga tuzatish kiritildi',
+      BILLING_SCHEDULE_CHANGED: 'To‘lov jadvali o‘zgartirildi', BILLING_PRICE_CHANGED: 'Kelishilgan narx o\u2018zgartirildi', BILLING_EXTENDED: 'Yashash muddati uzaytirildi',
+      PAYMENT_RECORDED: 'To‘lov qayd etildi', EXPENSE_RECORDED: 'Xarajat qayd etildi', EXPENSE_VOIDED: 'Xarajat bekor qilindi', PAYMENT_ADJUSTED: 'To‘lovga tuzatish kiritildi',
       SETTINGS_UPDATED: 'Sozlamalar yangilandi',
     },
-    entity: { User: 'Foydalanuvchi', Room: 'Xona', Resident: 'Yashovchi', BillingPeriod: 'To‘lov davri', Payment: 'To‘lov', SystemSetting: 'Tizim sozlamasi' },
+    entity: { User: 'Foydalanuvchi', Room: 'Xona', Resident: 'Yashovchi', BillingPeriod: 'To‘lov davri', Payment: 'To‘lov', SystemSetting: 'Tizim sozlamasi', Expense: 'Xarajat' },
     fields: {
       name: 'Ism-familiya', email: 'Elektron pochta', role: 'Rol', changed_fields: 'O‘zgargan maydonlar',
       number: 'Xona raqami', resident_id: 'Yashovchi raqami', amount: 'Summa', amount_delta: 'Tuzatish summasi',
       method: 'To‘lov usuli', adjustment_id: 'Tuzatish raqami', reason: 'Sabab', days_added: 'Qo‘shimcha kun',
-      old_end: 'Avvalgi tugash sanasi', new_end: 'Yangi tugash sanasi', dorm_name: 'Yotoqxona nomi',
+      old_end: 'Avvalgi tugash sanasi', new_end: 'Yangi tugash sanasi', old_amount: 'Avvalgi summa', new_amount: 'Yangi summa', category: 'Toifa', dorm_name: 'Yotoqxona nomi',
       first_name: 'Ism', last_name: 'Familiya', phone: 'Telefon', telegram_username: 'Telegram nomi',
       room_id: 'Xona raqami', check_in_date: 'Ko‘chib kirgan sana', billing_start: 'Davr boshlanishi',
       billing_end: 'Davr tugashi', payment_period_days: 'To‘lov davri', agreed_price: 'Kelishilgan narx', notes: 'Izoh',
@@ -74,8 +74,32 @@ export const uz = {
 export type PaymentMethod = keyof typeof uz.paymentMethod;
 export type BillingStatus = keyof typeof uz.status;
 
+function moneyToMinorUnits(value: number | string | null | undefined): bigint {
+  const match = /^(-?)(\d+)(?:[.,](\d+))?$/.exec(String(value ?? 0).trim());
+  if (!match) return 0n;
+  const units = BigInt(match[2]) * 100n + BigInt((match[3] ?? '').padEnd(2, '0').slice(0, 2));
+  return match[1] ? -units : units;
+}
+
+export function isPositiveMoney(value: number | string | null | undefined): boolean {
+  return moneyToMinorUnits(value) > 0n;
+}
+
+export function sumMoney(values: (number | string | null | undefined)[]): string {
+  const total = values.reduce((sum, value) => sum + moneyToMinorUnits(value), 0n);
+  const sign = total < 0n ? '-' : '';
+  const absolute = total < 0n ? -total : total;
+  return `${sign}${absolute / 100n}.${(absolute % 100n).toString().padStart(2, '0')}`;
+}
+
 export function formatMoney(value: number | string | null | undefined): string {
-  return `${new Intl.NumberFormat('uz-UZ', { maximumFractionDigits: 0 }).format(Number(value ?? 0))} so‘m`;
+  const raw = String(value ?? 0).trim();
+  const match = /^(-?)(\d+)(?:[.,](\d+))?$/.exec(raw);
+  if (!match) return `${new Intl.NumberFormat('uz-UZ', { maximumFractionDigits: 2 }).format(Number(value ?? 0))} so'm`;
+  const whole = new Intl.NumberFormat('uz-UZ', { maximumFractionDigits: 0 }).format(Number(match[2]));
+  const decimal = new Intl.NumberFormat('uz-UZ').formatToParts(1.1).find((part) => part.type === 'decimal')?.value ?? ',';
+  const fraction = (match[3] ?? '').padEnd(2, '0').slice(0, 2);
+  return `${match[1]}${whole}${decimal}${fraction} so'm`;
 }
 
 export function formatDate(value?: string | null, withYear = false): string {
