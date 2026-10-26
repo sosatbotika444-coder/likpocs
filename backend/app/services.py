@@ -108,6 +108,7 @@ def resident_out(db: Session, resident: Resident, as_of: date | None = None) -> 
         room_id=resident.room_id,
         room_number=resident.room.number if resident.room else None,
         check_in_date=resident.check_in_date,
+        departed_on=resident.departed_on,
         payment_period_days=resident.payment_period_days,
         agreed_price=resident.agreed_price,
         notes=resident.notes,

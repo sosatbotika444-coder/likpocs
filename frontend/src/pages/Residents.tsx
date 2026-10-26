@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Table, Tag, Typography, notification } from 'antd';
-import { EditOutlined, EyeOutlined, SwapOutlined } from '@ant-design/icons';
+import { EditOutlined, EyeOutlined, LogoutOutlined, SwapOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useSearchParams } from 'react-router-dom';
 import { api, errorMessage } from '../api';
@@ -31,7 +31,7 @@ export default function Residents() {
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
   const [roomId, setRoomId] = useState<string>();
-  const [showArchived, setShowArchived] = useState(false);
+  const [roster, setRoster] = useState<'active' | 'departed' | 'archived'>('active');
   const [editor, setEditor] = useState<Resident | null | false>(false);
   const [form] = Form.useForm<ResidentForm>();
   const [saving, setSaving] = useState(false);
@@ -39,18 +39,21 @@ export default function Residents() {
   const [residentPayments, setResidentPayments] = useState<Payment[]>([]);
   const [extension, setExtension] = useState<Resident | null>(null);
   const [extensionForm] = Form.useForm();
+  const [checkoutTarget, setCheckoutTarget] = useState<Resident | null>(null);
+  const [checkoutForm] = Form.useForm<{ checkout_date: dayjs.Dayjs; reason?: string }>();
+  const [checkingOut, setCheckingOut] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const load = async () => {
     setLoading(true); setError('');
     try {
-      const params = { q: search || undefined, payment_status: status, room_id: roomId, archived: showArchived, limit: 500 };
+      const params = { q: search || undefined, payment_status: status, room_id: roomId, archived: roster === 'archived', departed: roster === 'archived' ? 'all' : roster, limit: 500 };
       const [people, roomList, settings] = await Promise.all([api.get<Page<Resident>>('/residents', { params }), api.get<Page<Room>>('/rooms', { params: { limit: 500 } }), api.get<SystemSettings>('/settings')]);
       setRows(people.data.items); setRooms(roomList.data.items); setBillingAllowed(settings.data.billing_change_allowed); setDefaultPeriodDays(settings.data.default_period_days);
     } catch (e) { setError(errorMessage(e)); }
     finally { setLoading(false); }
   };
-  useEffect(() => { const timer = setTimeout(() => { void load(); }, 250); return () => clearTimeout(timer); }, [search, status, roomId, showArchived]);
+  useEffect(() => { const timer = setTimeout(() => { void load(); }, 250); return () => clearTimeout(timer); }, [search, status, roomId, roster]);
 
   const openEditor = (resident?: Resident) => {
     setEditor(resident || null);
@@ -117,19 +120,44 @@ export default function Residents() {
     } catch (e) { notice.error({ message: 'Muddatni uzaytirib bo‘lmadi', description: errorMessage(e) }); }
   };
 
+  const checkout = async (values: { checkout_date: dayjs.Dayjs; reason?: string }) => {
+    if (!checkoutTarget) return;
+    setCheckingOut(true);
+    try {
+      await api.post(`/residents/${checkoutTarget.id}/checkout`, {
+        checkout_date: values.checkout_date.format('YYYY-MM-DD'), reason: values.reason?.trim() || 'Muddatidan oldin chiqish',
+      });
+      notice.success({ message: 'Chiqish rasmiylashtirildi. Xona bo‘shatildi, yangi to‘lov davri ochilmaydi.' });
+      const person = checkoutTarget;
+      setCheckoutTarget(null); checkoutForm.resetFields(); await load();
+      if (detail?.id === person.id) await showDetail(person.id);
+    } catch (e) { notice.error({ message: 'Chiqishni rasmiylashtirib bo‘lmadi', description: errorMessage(e) }); }
+    finally { setCheckingOut(false); }
+  };
+
   const columns = [
-    { title: 'Yashovchi', dataIndex: 'first_name', sorter: (a: Resident, b: Resident) => a.last_name.localeCompare(b.last_name), render: (_: string, r: Resident) => <div className="resident-cell"><span className="person-avatar">{r.first_name[0]}{r.last_name[0]}</span><span><strong><Button type="link" className="resident-name-link" onClick={() => void showDetail(r)}>{r.first_name} {r.last_name}</Button></strong><small>{r.phone || r.telegram_username && `@${r.telegram_username}` || 'Aloqa ma’lumoti yo‘q'}</small></span></div> },
+    { title: 'Yashovchi', dataIndex: 'first_name', sorter: (a: Resident, b: Resident) => a.last_name.localeCompare(b.last_name), render: (_: string, r: Resident) => <div className="resident-cell"><span className="person-avatar">{r.first_name[0]}{r.last_name[0]}</span><span><strong><Button type="link" title="Yashovchining kartasi, qarzi va to‘lovlar tarixini ochish" className="resident-name-link" onClick={() => void showDetail(r)}>{r.first_name} {r.last_name}</Button>{r.departed_on && <Tag color="gold">Chiqib ketgan · {formatDate(r.departed_on)}</Tag>}</strong><small>{r.phone || r.telegram_username && `@${r.telegram_username}` || 'Aloqa ma’lumoti yo‘q'}</small></span></div> },
     { title: 'Xona', dataIndex: 'room_number', render: (v: string | null) => v ? <span className="room-pill">{v}</span> : <Text type="secondary">Tayinlanmagan</Text> },
     { title: 'To‘lov holati', dataIndex: 'billing_status', render: (v: string) => statusTag(v) },
     { title: 'Muddat', dataIndex: 'billing_end', render: (v: string | null) => formatDate(v) },
     { title: 'Qarzdorlik', dataIndex: 'balance', align: 'right' as const, render: (v: number) => <strong className={v > 0 ? 'text-danger' : ''}>{formatMoney(v)}</strong> },
-    { title: '', key: 'actions', align: 'right' as const, render: (_: unknown, r: Resident) => <Actions><Button type="text" icon={<EyeOutlined />} aria-label="Batafsil" onClick={() => void showDetail(r)}/>{!showArchived && <><Button type="text" icon={<EditOutlined />} aria-label="Tahrirlash" onClick={() => openEditor(r)}/>{(user?.role === 'OPERATOR' || billingAllowed) && <Button type="text" icon={<SwapOutlined />} aria-label="Muddatni uzaytirish" onClick={() => { setExtension(r); extensionForm.setFieldsValue({ days: r.payment_period_days || 30 }); }}/>}<Popconfirm title="Yashovchini arxivlaysizmi?" description="To‘lovlar tarixi saqlanadi." okText="Arxivlash" cancelText="Bekor qilish" onConfirm={() => void archive(r)}><Button type="text" danger aria-label="Arxivlash">Arxiv</Button></Popconfirm></>}{showArchived && user?.role === 'OPERATOR' && <Popconfirm title="Yashovchini tiklaysizmi?" okText="Tiklash" cancelText="Bekor qilish" onConfirm={() => void restore(r)}><Button type="text">Tiklash</Button></Popconfirm>}</Actions> },
+    { title: '', key: 'actions', align: 'right' as const, render: (_: unknown, r: Resident) => <Actions>
+      <Button type="text" title="Yashovchining kartasi va to‘lovlar tarixini ochish" icon={<EyeOutlined />} aria-label="Batafsil" onClick={() => void showDetail(r)}/>
+      {roster === 'active' && <>
+        <Button type="text" title="Aloqa, xona va yashovchi ma’lumotlarini tahrirlash" icon={<EditOutlined />} aria-label="Tahrirlash" onClick={() => openEditor(r)}/>
+        {(user?.role === 'OPERATOR' || billingAllowed) && <Button type="text" title="Joriy to‘lov davrining tugash sanasini uzaytirish" icon={<SwapOutlined />} aria-label="Muddatni uzaytirish" onClick={() => { setExtension(r); extensionForm.setFieldsValue({ days: r.payment_period_days || 30 }); }}/>}
+        <Button type="text" title="Chiqish sanasini belgilang, xona bo‘shatiladi va yangi hisob davri to‘xtaydi" icon={<LogoutOutlined />} aria-label="Muddatidan oldin chiqish" onClick={() => { setCheckoutTarget(r); checkoutForm.setFieldsValue({ checkout_date: dayjs(), reason: '' }); }}/>
+        <Popconfirm title="Yashovchini arxivlaysizmi?" description="Arxivlash ro‘yxatni yashiradi. To‘lovlar tarixi saqlanadi." okText="Arxivlash" cancelText="Bekor qilish" onConfirm={() => void archive(r)}><Button type="text" danger title="Profilni arxiv ro‘yxatiga o‘tkazish" aria-label="Arxivlash">Arxiv</Button></Popconfirm>
+      </>}
+      {roster === 'departed' && <Button type="text" title="Yashovchini bugundan boshlab qayta joylashtirish" icon={<EditOutlined />} onClick={() => { openEditor(r); form.setFieldValue('check_in_date', dayjs()); }}>Qayta joylashtirish</Button>}
+      {roster === 'archived' && user?.role === 'OPERATOR' && <Popconfirm title="Yashovchini tiklaysizmi?" okText="Tiklash" cancelText="Bekor qilish" onConfirm={() => void restore(r)}><Button type="text" title="Arxivdan chiqarish">Tiklash</Button></Popconfirm>}
+    </Actions> },
   ];
 
   return <div className="page-stack">{holder}
     <PageHeading eyebrow="YASHASH JOYI HISOBI" title="Yashovchilar" subtitle="Yashovchilar, joylashuv va to‘lov davrlarini boshqaring." action="Yashovchi qo‘shish" onAction={() => openEditor()} />
     {error && <Alert type="error" showIcon message="Ro‘yxatni yuklab bo‘lmadi" description={error} action={<Button size="small" onClick={() => void load()}>Qayta yuklash</Button>} />}
-    <div className="toolbar panel"><Input.Search allowClear placeholder="Ism, xona, telefon yoki Telegram bo‘yicha qidirish" value={search} onChange={(e) => setSearch(e.target.value)} className="search-input"/><Select value={status} onChange={setStatus} options={[{value:'all',label:'Barcha holatlar'},{value:'CURRENT',label:'Amalda'},{value:'DUE_SOON',label:'Yaqinlashmoqda'},{value:'DUE_TODAY',label:'Bugun to‘lanadi'},{value:'OVERDUE',label:'Muddati o‘tgan'},{value:'PAID',label:'To‘langan'},{value:'NOT_CONFIGURED',label:'Davr belgilanmagan'}]} /><Select allowClear placeholder="Barcha xonalar" value={roomId} onChange={setRoomId} options={rooms.map((r) => ({ value: r.id, label: `Xona ${r.number}` }))}/><Select value={showArchived} onChange={setShowArchived} options={[{value:false,label:'Faol yashovchilar'},{value:true,label:'Arxivdagilar'}]}/><span className="toolbar-count">Jami: <strong>{rows.length}</strong></span></div>
+    <div className="toolbar panel"><Input.Search allowClear title="Ism, xona, telefon yoki Telegram bo‘yicha izlash" placeholder="Ism, xona, telefon yoki Telegram bo‘yicha qidirish" value={search} onChange={(e) => setSearch(e.target.value)} className="search-input"/><Select title="To‘lov holati bo‘yicha filtrlash" value={status} onChange={setStatus} options={[{value:'all',label:'Barcha to‘lov holatlari'},{value:'CURRENT',label:'Amalda'},{value:'DUE_SOON',label:'Yaqinlashmoqda'},{value:'DUE_TODAY',label:'Bugun to‘lanadi'},{value:'OVERDUE',label:'Muddati o‘tgan'},{value:'PAID',label:'To‘langan'},{value:'NOT_CONFIGURED',label:'Davr belgilanmagan'}]} /><Select title="Xonani tanlab filtrlash" allowClear placeholder="Barcha xonalar" value={roomId} onChange={setRoomId} options={rooms.map((r) => ({ value: r.id, label: `Xona ${r.number}` }))}/><Select title="Faol, chiqib ketgan yoki arxivdagi profillarni ko‘rsatish" value={roster} onChange={setRoster} options={[{value:'active',label:'Yashayotganlar'},{value:'departed',label:'Chiqib ketganlar'},{value:'archived',label:'Arxivdagilar'}]}/><span className="toolbar-count">Jami: <strong>{rows.length}</strong></span></div>
     <div className="panel table-panel"><Table rowKey="id" loading={loading} columns={columns} dataSource={rows} scroll={{ x: 850 }} pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (n) => `Jami ${n} ta` }} locale={{ emptyText: 'Yashovchilar ro‘yxati bo‘sh' }} /></div>
 
     <Modal open={editor !== false} title={editor ? 'Yashovchini tahrirlash' : 'Yangi yashovchi'} onCancel={() => { setEditor(false); form.resetFields(); }} onOk={() => form.submit()} confirmLoading={saving} okText="Saqlash" cancelText="Bekor qilish" width={700} destroyOnClose>
@@ -139,12 +167,12 @@ export default function Residents() {
     </Modal>
 
     <Drawer title={detail ? `${detail.first_name} ${detail.last_name}` : 'Yashovchi'} open={Boolean(detail)} onClose={() => setDetail(null)} width={620} extra={detail && <Button icon={<EditOutlined/>} onClick={() => { const row = rows.find((r) => r.id === detail.id); if (row) openEditor(row); }}>Tahrirlash</Button>}>
-      {detail && <div className="detail-stack"><Descriptions bordered size="small" column={2} items={[{key:'room',label:'Xona',children:detail.room_number || 'Tayinlanmagan'},{key:'status',label:'Holat',children:statusTag(detail.billing_status)},{key:'phone',label:'Telefon',children:detail.phone || '—'},{key:'telegram',label:'Telegram',children:detail.telegram_username ? `@${detail.telegram_username}` : '—'},{key:'period',label:'Davr',children:detail.payment_period_days ? `${detail.payment_period_days} kun` : 'Belgilanmagan'},{key:'price',label:'Kelishilgan narx',children:formatMoney(detail.agreed_price)},{key:'dates',label:'To‘lov davri',children:`${formatDate(detail.billing_start)} — ${formatDate(detail.billing_end)}`},{key:'debt',label:'Qarzdorlik',children:formatMoney(detail.balance)}]}/>
+      {detail && <div className="detail-stack"><Descriptions bordered size="small" column={2} items={[{key:'room',label:'Xona',children:detail.room_number || 'Tayinlanmagan'},{key:'stay',label:'Yashash holati',children:detail.departed_on ? `Chiqib ketgan · ${formatDate(detail.departed_on)}` : 'Yashamoqda'},{key:'checkin',label:'Ko‘chib kirgan',children:formatDate(detail.check_in_date)},{key:'status',label:'To‘lov holati',children:statusTag(detail.billing_status)},{key:'phone',label:'Telefon',children:detail.phone || '—'},{key:'telegram',label:'Telegram',children:detail.telegram_username ? `@${detail.telegram_username}` : '—'},{key:'period',label:'Davr',children:detail.payment_period_days ? `${detail.payment_period_days} kun` : 'Belgilanmagan'},{key:'price',label:'Kelishilgan narx',children:formatMoney(detail.agreed_price)},{key:'dates',label:'To‘lov davri',children:`${formatDate(detail.billing_start)} — ${formatDate(detail.billing_end)}`},{key:'debt',label:'Qarzdorlik',children:formatMoney(detail.balance)}]}/>
         <section><h3>To‘lovlar tarixi</h3><Table size="small" rowKey="id" dataSource={residentPayments} pagination={false} scroll={{x:450}} columns={[{title:'Sana',dataIndex:'payment_date',render:(v:string)=>formatDate(v)},{title:'Usul',dataIndex:'method',render:(v:string)=>({CASH:'Naqd pul',BANK:'Bank o‘tkazmasi',CLICK:'Click',PAYME:'Payme',OTHER:'Boshqa'}[v]||v)},{title:'Summa',dataIndex:'net_amount',align:'right',render:(v:number)=>formatMoney(v)}]} locale={{emptyText:'To‘lovlar tarixi mavjud emas'}}/></section>
         <section><h3>To‘lov davrlari</h3><Table size="small" rowKey="id" dataSource={detail.billing_history as BillingPeriod[]} pagination={false} scroll={{x:460}} columns={[{title:'Davr',render:(_:unknown,p:BillingPeriod)=>`${formatDate(p.start_date)} — ${formatDate(p.end_date)}`},{title:'Hisoblangan',dataIndex:'charge_amount',render:formatMoney},{title:'Qoldiq',dataIndex:'balance',render:formatMoney},{title:'Holat',dataIndex:'status',render:statusTag}]} locale={{emptyText:'Davrlar sozlanmagan'}}/></section>
         {detail.changes.length > 0 && <section><h3>Narx va to'lov davri tarixi</h3><Table size="small" rowKey="id" dataSource={detail.changes} pagination={false} scroll={{ x: 540 }} columns={[
           { title: 'Sana', dataIndex: 'created_at', render: (v: string) => formatDate(v, true) },
-          { title: "O'zgarish", dataIndex: 'change_type', render: (v: string) => v === 'PRICE_CHANGE' ? "Narx o'zgardi" : v === 'EXTENSION' ? 'Muddat uzaytirildi' : "To'lov jadvali" },
+          { title: "O'zgarish", dataIndex: 'change_type', render: (v: string) => v === 'PRICE_CHANGE' ? "Narx o'zgardi" : v === 'EXTENSION' ? 'Muddat uzaytirildi' : v === 'EARLY_CHECKOUT_CLOSED' ? 'Erta chiqishda kelajak davri yopildi' : "To'lov jadvali" },
           { title: 'Eski narx', dataIndex: 'old_charge_amount', render: (v: number | string | null) => v == null ? '\u2014' : formatMoney(v) },
           { title: 'Yangi narx', dataIndex: 'new_charge_amount', render: (v: number | string | null) => v == null ? '\u2014' : formatMoney(v) },
           { title: 'Sabab', dataIndex: 'reason' },
@@ -154,6 +182,16 @@ export default function Residents() {
     <Modal open={Boolean(extension)} title="Yashash muddatini uzaytirish" onCancel={() => setExtension(null)} onOk={() => extensionForm.submit()} okText="Muddatni saqlash" cancelText="Bekor qilish" destroyOnClose>
       <Alert type="info" showIcon message="Muddat uzaytirish to‘lov hisoblanmaydi. Haqiqiy to‘lovni alohida qayd eting." className="modal-alert"/>
       <Form form={extensionForm} layout="vertical" onFinish={extend} className="extension-form"><Form.Item name="days" label="Qo‘shimcha kunlar"><InputNumber min={1} max={365000} className="full-width"/></Form.Item><div className="or-separator">yoki aniq tugash sanasi</div><Form.Item name="end_date" label="Yangi tugash sanasi"><DatePicker className="full-width" format="DD.MM.YYYY"/></Form.Item><Form.Item name="reason" label="Izoh"><Input.TextArea rows={2}/></Form.Item></Form>
+    </Modal>
+    <Modal open={Boolean(checkoutTarget)} title="Muddatidan oldin chiqishni rasmiylashtirish" onCancel={() => { setCheckoutTarget(null); checkoutForm.resetFields(); }} onOk={() => checkoutForm.submit()} confirmLoading={checkingOut} okText="Chiqishni tasdiqlash" cancelText="Bekor qilish" destroyOnClose>
+      {checkoutTarget && <div className="checkout-flow">
+        <p><strong>{checkoutTarget.first_name} {checkoutTarget.last_name}</strong>{checkoutTarget.room_number ? ` · ${checkoutTarget.room_number}-xona` : ''}</p>
+          <Alert type="warning" showIcon message="Tanlangan sanadan boshlab xona bo‘sh hisoblanadi." description="Joriy hisob va qayd etilgan to‘lovlar o‘zgarmaydi, qolgan qarz saqlanadi. To‘lovsiz, hali boshlanmagan hisob davrlari yopiladi; qisman yoki to‘liq to‘langan davrlar o‘zgarmaydi. Chiqishdan keyin yangi davr ochilmaydi. Qaytarim yoki narxni qayta hisoblash kerak bo‘lsa, moliyaviy tuzatishni alohida kiriting." />
+        <Form form={checkoutForm} layout="vertical" onFinish={checkout}>
+          <Form.Item name="checkout_date" label="Xona bo‘sh bo‘ladigan sana" rules={[{ required: true, message: 'Sanani tanlang.' }]}><DatePicker className="full-width" format="DD.MM.YYYY" disabledDate={(current) => current.isAfter(dayjs(), 'day') || Boolean(checkoutTarget.check_in_date && current.isBefore(dayjs(checkoutTarget.check_in_date), 'day'))}/></Form.Item>
+          <Form.Item name="reason" label="Izoh"><Input.TextArea rows={3} maxLength={1000} placeholder="Masalan: o‘quvchi o‘z xohishiga ko‘ra muddatidan oldin ketdi"/></Form.Item>
+        </Form>
+      </div>}
     </Modal>
   </div>;
 }

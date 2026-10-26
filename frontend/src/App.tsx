@@ -20,6 +20,7 @@ const Expenses = lazy(() => import('./pages/Expenses'));
 const SettingsPage = lazy(() => import('./pages/Settings'));
 const Landing = lazy(() => import('./pages/Landing'));
 const Admissions = lazy(() => import('./pages/Admissions'));
+const AdminGuide = lazy(() => import('./pages/AdminGuide'));
 const PublicApplication = lazy(async () => {
   const module = await import('./pages/Admissions');
   return { default: module.PublicApplication };
@@ -30,7 +31,7 @@ const { Text } = Typography;
 const routeTitles: Record<string, string> = {
   '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
   '/payments': uz.nav.payments, '/expenses': uz.nav.expenses, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
-  '/admissions': uz.nav.admissions,
+  '/admissions': uz.nav.admissions, '/guide': 'Administrator uchun qo‘llanma',
 };
 
 function Login() {
@@ -93,6 +94,7 @@ function Shell() {
     { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
     { key: '/expenses', icon: <DollarCircleOutlined />, label: uz.nav.expenses },
     { key: '/reports', icon: <FileExcelOutlined />, label: uz.nav.reports },
+    { key: '/guide', icon: <QuestionCircleOutlined />, label: 'Qo‘llanma' },
     { type: 'divider' as const },
     { key: '/settings', icon: <SettingOutlined />, label: uz.nav.settings },
     ...(user?.role === 'OPERATOR' ? [
@@ -106,7 +108,7 @@ function Shell() {
     <div className="side-section-label">ISH MAYDONI</div>
     <Menu theme="dark" mode="inline" selectedKeys={[location.pathname]} items={menuItems} onClick={({ key }) => { navigate(key); setDrawer(false); }} />
     <div className="sidebar-spacer"/>
-    <div className="help-card"><span className="help-spark">✳</span><strong>Yordam kerakmi?</strong><p>RS Best Hostel bo‘yicha qo‘llanmani oching.</p><Button type="link" icon={<QuestionCircleOutlined />} onClick={() => notice.info({ message: 'RS Best Hostel qo‘llanmasi', description: 'Yashovchi, xona va to‘lovlarni menyu bo‘limlaridan boshqaring. To‘lov muddati uzaytirilganda u to‘lov sifatida qayd etilmaydi.' })}>Qo‘llanmani ko‘rish</Button></div>
+    <div className="help-card"><span className="help-spark">✳</span><strong>Yordam kerakmi?</strong><p>Administrator qo‘llanmasida tugmalar va jarayonlar tushuntirilgan.</p><Button type="link" title="Barcha bo‘limlar va tugmalar uchun yo‘riqnomani ochish" icon={<QuestionCircleOutlined />} onClick={() => { navigate('/guide'); setDrawer(false); }}>Qo‘llanmani ko‘rish</Button></div>
     <div className="side-account"><Avatar size={34} className="account-avatar">{initials}</Avatar><div className="account-copy"><strong>{user?.full_name}</strong><small>{user ? uz.role[user.role as Role] : ''}</small></div><Button type="text" icon={<LogoutOutlined />} aria-label="Tizimdan chiqish" onClick={logout}/></div>
   </>;
 
@@ -162,6 +164,7 @@ export default function App() {
       <Route path="/residents" element={<Residents/>}/>
       <Route path="/rooms" element={<Rooms/>}/>
       <Route path="/admissions" element={<Admissions/>}/>
+      <Route path="/guide" element={<AdminGuide/>}/>
       <Route path="/payments" element={<Payments/>}/>
       <Route path="/expenses" element={<Expenses/>}/>
       <Route path="/reports" element={<Reports/>}/>

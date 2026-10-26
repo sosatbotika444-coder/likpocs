@@ -112,8 +112,11 @@ def record_room_assignment(
     return period
 
 
-def close_open_period(db: Session, resident: Resident, ended_at: datetime | None = None) -> None:
-    end_date = ended_at.astimezone(ZoneInfo(settings.timezone)).date() if ended_at else today_local()
+def close_open_period(db: Session, resident: Resident, ended_at: datetime | date | None = None) -> None:
+    if isinstance(ended_at, date) and not isinstance(ended_at, datetime):
+        end_date = ended_at
+    else:
+        end_date = ended_at.astimezone(ZoneInfo(settings.timezone)).date() if ended_at else today_local()
     periods = db.scalars(
         select(ResidencePeriod)
         .where(

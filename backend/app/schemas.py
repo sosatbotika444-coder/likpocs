@@ -166,6 +166,7 @@ class ResidentOut(ORMModel):
     room_id: UUID | None
     room_number: str | None = None
     check_in_date: date | None
+    departed_on: date | None = None
     payment_period_days: int | None
     agreed_price: Decimal | None
     notes: str
@@ -196,6 +197,11 @@ class ExtendRequest(BaseModel):
         if self.days is None and self.end_date is None:
             raise ValueError("Kunlar soni yoki yangi tugash sanasini kiriting.")
         return self
+
+
+class CheckoutRequest(BaseModel):
+    checkout_date: date
+    reason: str = Field(default="Muddatidan oldin chiqish", max_length=1000)
 
 
 PaymentMethod = Literal["CASH", "BANK", "CLICK", "PAYME", "OTHER"]

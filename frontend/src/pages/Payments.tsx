@@ -28,8 +28,12 @@ export default function Payments() {
     setLoading(true); setError('');
     try {
       const params = { date_from: range[0], date_to: range[1], limit: 500 };
-      const [payments, people] = await Promise.all([api.get<Page<Payment>>('/payments', { params }), api.get<Page<Resident>>('/residents', { params: { limit: 500 } })]);
-      setRows(payments.data.items); setTotal(payments.data.total); setResidents(people.data.items);
+      const [payments, people, departed] = await Promise.all([
+        api.get<Page<Payment>>('/payments', { params }),
+        api.get<Page<Resident>>('/residents', { params: { limit: 500 } }),
+        api.get<Page<Resident>>('/residents', { params: { departed: 'departed', limit: 500 } }),
+      ]);
+      setRows(payments.data.items); setTotal(payments.data.total); setResidents([...people.data.items, ...departed.data.items]);
     } catch (e) { setError(errorMessage(e)); }
     finally { setLoading(false); }
   };
@@ -70,7 +74,7 @@ export default function Payments() {
     <div className="toolbar panel"><span className="toolbar-label">Davr</span><DatePicker.RangePicker format="DD.MM.YYYY" onChange={(v)=>setRange([v?.[0]?.format('YYYY-MM-DD'),v?.[1]?.format('YYYY-MM-DD')])}/><Button type="link" onClick={()=>setRange([undefined,undefined])}>Filtrni tozalash</Button></div>
     <div className="panel table-panel"><Table rowKey="id" loading={loading} columns={columns} dataSource={rows} scroll={{x:950}} pagination={{pageSize:15,showTotal:(n)=>`Jami ${n} ta`}} locale={{emptyText:'Tanlangan davrda to‘lovlar yo‘q'}}/></div>
     <Modal open={editor} title="Yangi to‘lov" onCancel={()=>setEditor(false)} onOk={()=>form.submit()} confirmLoading={saving} okText="To‘lovni saqlash" cancelText="Bekor qilish" destroyOnClose>
-      <Form form={form} layout="vertical" onValuesChange={() => { paymentKey.current = null; }} onFinish={save}><Form.Item name="resident_id" label="Yashovchi" rules={[{required:true,message:'Yashovchini tanlang.'}]}><Select showSearch optionFilterProp="label" placeholder="Qarzdorligi bor yashovchini tanlang" options={eligible.map((r)=>({value:r.id,label:`${r.first_name} ${r.last_name} · ${r.room_number||'Xona yo‘q'} · ${formatMoney(r.balance)}`}))}/></Form.Item><Form.Item name="amount" label="Summa (so‘m)" rules={[{required:true,message:'Summani kiriting.'}]}><InputNumber<string> stringMode min="0.01" precision={2} controls={false} className="full-width"/></Form.Item><div className="form-grid"><Form.Item name="payment_date" label="To‘lov sanasi" rules={[{required:true,message:'Sanani tanlang.'}]}><Input type="date"/></Form.Item><Form.Item name="method" label="To‘lov usuli" rules={[{required:true,message:'Usulni tanlang.'}]}><Select options={[{value:'CASH',label:'Naqd pul'},{value:'BANK',label:'Bank o‘tkazmasi'},{value:'CLICK',label:'Click'},{value:'PAYME',label:'Payme'},{value:'OTHER',label:'Boshqa'}]}/></Form.Item></div><Form.Item name="notes" label="Izoh"><Input.TextArea rows={2}/></Form.Item></Form>
+      <Form form={form} layout="vertical" onValuesChange={() => { paymentKey.current = null; }} onFinish={save}><Form.Item name="resident_id" label="Yashovchi" rules={[{required:true,message:'Yashovchini tanlang.'}]}><Select showSearch optionFilterProp="label" placeholder="Qarzdorligi bor yashovchini tanlang" options={eligible.map((r)=>({value:r.id,label:`${r.first_name} ${r.last_name}${r.departed_on ? ' · Chiqib ketgan' : ''} · ${r.room_number||'Xona yo‘q'} · ${formatMoney(r.balance)}`}))}/></Form.Item><Form.Item name="amount" label="Summa (so‘m)" rules={[{required:true,message:'Summani kiriting.'}]}><InputNumber<string> stringMode min="0.01" precision={2} controls={false} className="full-width"/></Form.Item><div className="form-grid"><Form.Item name="payment_date" label="To‘lov sanasi" rules={[{required:true,message:'Sanani tanlang.'}]}><Input type="date"/></Form.Item><Form.Item name="method" label="To‘lov usuli" rules={[{required:true,message:'Usulni tanlang.'}]}><Select options={[{value:'CASH',label:'Naqd pul'},{value:'BANK',label:'Bank o‘tkazmasi'},{value:'CLICK',label:'Click'},{value:'PAYME',label:'Payme'},{value:'OTHER',label:'Boshqa'}]}/></Form.Item></div><Form.Item name="notes" label="Izoh"><Input.TextArea rows={2}/></Form.Item></Form>
       {!eligible.length&&<Alert type="warning" showIcon message="To‘lov davri va qarzdorligi sozlangan yashovchi topilmadi."/>}
     </Modal>
     <Modal open={Boolean(adjusting)} title="To‘lovni tuzatish" onCancel={()=>setAdjusting(null)} onOk={()=>adjustForm.submit()} confirmLoading={saving} okText="Tuzatishni qayd etish" cancelText="Bekor qilish" destroyOnClose>

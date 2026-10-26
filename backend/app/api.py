@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.audit import audit, notify
 from app.billing import (
     create_initial_period,
+    close_unpaid_future_periods_for_departure,
     current_period,
     ensure_period,
     extend_period,
@@ -57,6 +58,7 @@ from app.models import (
 from app.schemas import (
     AuditEventOut,
     BillingPeriodOut,
+    CheckoutRequest,
     DashboardOut,
     ExtendRequest,
     ExpenseCreate,
@@ -115,7 +117,7 @@ def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> N
     created = False
     for resident in residents:
         resident = db.scalar(select(Resident).where(Resident.id == resident.id).with_for_update())
-        if not resident or resident.is_archived or current_period(db, resident.id):
+        if not resident or resident.is_archived or resident.departed_on is not None or current_period(db, resident.id):
             continue
         latest = db.scalar(
             select(BillingPeriod)
@@ -377,11 +379,14 @@ def archive_room(room_id: UUID, db: Session = Depends(get_db), actor: User = Dep
 @router.get("/residents", response_model=PageInfo)
 def list_residents(
     q: str = "", room_id: UUID | None = None, payment_status: str = "all", archived: bool = False,
+    departed: Literal["active", "departed", "all"] = "active",
     sort: str = "last_name", direction: Literal["asc", "desc"] = "asc",
     skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> PageInfo:
     query = select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(archived))
+    if departed != "all":
+        query = query.where(Resident.departed_on.is_not(None) if departed == "departed" else Resident.departed_on.is_(None))
     if room_id:
         query = query.where(Resident.room_id == room_id)
     if q.strip():
@@ -472,6 +477,7 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
         setattr(resident, key, value)
     if "room_id" in values or "check_in_date" in values:
         if next_room:
+            resident.departed_on = None
             record_room_assignment(db, resident, next_room, next_start or today_local(), None, actor)
         else:
             close_open_period(db, resident)
@@ -519,6 +525,41 @@ def archive_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
     return resident_out(db, resident)
 
 
+@router.post("/residents/{resident_id}/checkout", response_model=ResidentOut)
+def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
+    resident = db.scalar(select(Resident).where(Resident.id == resident_id).with_for_update())
+    if not resident:
+        raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
+    if resident.is_archived:
+        raise HTTPException(status_code=409, detail="Arxivdagi yashovchini muddatidan oldin chiqara olmaysiz.")
+    if resident.departed_on is not None:
+        raise HTTPException(status_code=409, detail="Yashovchining chiqishi oldin rasmiylashtirilgan.")
+    if payload.checkout_date > today_local():
+        raise HTTPException(status_code=422, detail="Chiqish sanasi bugundan keyin bo'lishi mumkin emas.")
+    if resident.check_in_date and payload.checkout_date < resident.check_in_date:
+        raise HTTPException(status_code=422, detail="Chiqish sanasi ko'chib kirish sanasidan oldin bo'lishi mumkin emas.")
+
+    old_room_id = resident.room_id
+    close_open_period(db, resident, payload.checkout_date)
+    closed_billing_ids = close_unpaid_future_periods_for_departure(
+        db, resident, actor, payload.checkout_date,
+        payload.reason.strip() or "Muddatidan oldin chiqish",
+    )
+    resident.room_id = None
+    resident.departed_on = payload.checkout_date
+    resident.updated_at = datetime.now(UTC)
+    audit(db, actor, "RESIDENT_CHECKED_OUT", "Resident", resident.id, {
+        "checkout_date": payload.checkout_date.isoformat(),
+        "previous_room_id": str(old_room_id) if old_room_id else None,
+        "reason": payload.reason.strip() or "Muddatidan oldin chiqish",
+        "billing_policy": "Joriy hisob va to'lovlar saqlanadi; to'lovsiz boshlanmagan davrlar yopiladi; yangi davr ochilmaydi.",
+        "closed_unpaid_billing_period_ids": [str(item) for item in closed_billing_ids],
+    })
+    db.commit()
+    db.refresh(resident)
+    return resident_out(db, resident)
+
+
 @router.post("/residents/{resident_id}/restore", response_model=ResidentOut)
 def restore_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(require_operator)) -> ResidentOut:
     resident = db.get(Resident, resident_id)
@@ -541,6 +582,8 @@ def extend_resident(resident_id: UUID, payload: ExtendRequest, db: Session = Dep
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
+    if resident.departed_on is not None:
+        raise HTTPException(status_code=409, detail="Chiqib ketgan yashovchi uchun muddatni uzaytirib bo'lmaydi.")
     period = extend_period(db, resident, actor, payload.days, payload.end_date, payload.reason)
     notify(db, "Yashash muddati uzaytirildi", f"{resident.first_name} {resident.last_name} uchun muddat yangilandi. To‘lov alohida qayd etiladi.", "BILLING", resident.id, actor.id)
     db.commit()
@@ -780,6 +823,7 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
     residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
     active_rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
     items = [resident_out(db, item, today) for item in residents]
+    currently_housed = [item for item in items if item.departed_on is None]
     capacity = sum(room.capacity for room in active_rooms)
     room_stats = [room_out(db, room) for room in active_rooms]
     assigned = sum(item.resident_count for item in room_stats)
@@ -805,11 +849,11 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
         amount = sum((net_payment(db, item) for item in payments if month <= item.payment_date < next_month), Decimal("0"))
         trend.append({"month": f"{UZ_MONTHS[month.month - 1]} {month.year}", "amount": amount})
     recent = db.scalars(select(Payment).options(joinedload(Payment.resident)).order_by(Payment.payment_date.desc(), Payment.created_at.desc()).limit(6)).all()
-    new_residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False)).order_by(Resident.created_at.desc()).limit(5)).all()
+    new_residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False), Resident.departed_on.is_(None)).order_by(Resident.created_at.desc()).limit(5)).all()
     return DashboardOut(
-        residents=len(residents), rooms=len(active_rooms), occupancy_rate=round(assigned / capacity * 100, 1) if capacity else 0,
-        available_beds=max(0, capacity - assigned), due_today=sum(x.billing_status == "DUE_TODAY" for x in items),
-        due_soon=sum(x.billing_status == "DUE_SOON" for x in items), overdue=sum(x.billing_status == "OVERDUE" for x in items),
+        residents=len(currently_housed), rooms=len(active_rooms), occupancy_rate=round(assigned / capacity * 100, 1) if capacity else 0,
+        available_beds=max(0, capacity - assigned), due_today=sum(x.billing_status == "DUE_TODAY" for x in currently_housed),
+        due_soon=sum(x.billing_status == "DUE_SOON" for x in currently_housed), overdue=sum(x.billing_status == "OVERDUE" for x in currently_housed),
         actual_revenue=month_income, actual_expenses=month_expenses, net_cash_flow=month_income - month_expenses,
         expected_payments=expected, outstanding_debt=outstanding,
         revenue_trend=trend,

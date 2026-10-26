@@ -64,6 +64,7 @@ class Resident(Base):
     telegram_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     room_id: Mapped[UUID | None] = mapped_column(ForeignKey("rooms.id", ondelete="RESTRICT"), nullable=True, index=True)
     check_in_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    departed_on: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     payment_period_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     agreed_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     notes: Mapped[str] = mapped_column(Text, default="")

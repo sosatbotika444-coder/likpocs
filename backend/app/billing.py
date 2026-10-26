@@ -38,7 +38,7 @@ def current_period(db: Session, resident_id: UUID) -> BillingPeriod | None:
 
 
 def ensure_period(db: Session, resident: Resident, actor: User | None, as_of: date | None = None) -> BillingPeriod | None:
-    if not resident.payment_period_days:
+    if resident.departed_on is not None or not resident.payment_period_days:
         return None
     open_period = current_period(db, resident.id)
     if open_period:
@@ -186,3 +186,43 @@ def mark_paid_and_advance(db: Session, period: BillingPeriod, actor: User) -> Bi
     period.status = "PAID"
     db.flush()
     return ensure_period(db, period.resident, actor)
+
+
+def close_unpaid_future_periods_for_departure(
+    db: Session, resident: Resident, actor: User, checkout_date: date, reason: str
+) -> list[UUID]:
+    """Close only unstarted, unpaid billing periods after a resident leaves."""
+    periods = db.scalars(
+        select(BillingPeriod)
+        .where(
+            BillingPeriod.resident_id == resident.id,
+            BillingPeriod.status == "OPEN",
+            BillingPeriod.start_date >= checkout_date,
+        )
+        .order_by(BillingPeriod.start_date)
+        .with_for_update()
+    ).all()
+    closed_ids: list[UUID] = []
+    for period in periods:
+        if period_paid(db, period.id) > ZERO:
+            continue
+        period.status = "CLOSED"
+        db.add(BillingChange(
+            resident_id=resident.id,
+            billing_period_id=period.id,
+            old_start_date=period.start_date,
+            old_end_date=period.end_date,
+            old_charge_amount=period.charge_amount,
+            new_start_date=period.start_date,
+            new_end_date=period.end_date,
+            new_charge_amount=period.charge_amount,
+            change_type="EARLY_CHECKOUT_CLOSED",
+            reason=reason,
+            changed_by=actor.id,
+        ))
+        audit(db, actor, "FUTURE_BILLING_CLOSED", "BillingPeriod", period.id, {
+            "resident_id": str(resident.id), "checkout_date": checkout_date.isoformat(),
+            "charge_amount": str(period.charge_amount),
+        })
+        closed_ids.append(period.id)
+    return closed_ids

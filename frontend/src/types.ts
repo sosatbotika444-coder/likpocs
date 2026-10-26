@@ -6,7 +6,7 @@ export type Room = {
 };
 export type Resident = {
   id: string; first_name: string; last_name: string; phone: string | null; telegram_username: string | null;
-  room_id: string | null; room_number: string | null; check_in_date: string | null;
+  room_id: string | null; room_number: string | null; check_in_date: string | null; departed_on: string | null;
   payment_period_days: number | null; agreed_price: number | null; notes: string; is_archived: boolean;
   created_at: string; updated_at: string; billing_start: string | null; billing_end: string | null;
   billing_period_id: string | null; billing_status: string; paid_amount: number; balance: number; overdue_days: number;
