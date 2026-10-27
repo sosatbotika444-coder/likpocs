@@ -27,6 +27,8 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     financial = load_revision(root / "alembic" / "versions" / "20261026_01_financial_controls_and_expenses.py")
     ocr = load_revision(root / "alembic" / "versions" / "20261026_02_application_file_ocr.py")
     file_blobs = load_revision(root / "alembic" / "versions" / "20261026_03_postgres_application_file_blobs.py")
+    departures = load_revision(root / "alembic" / "versions" / "20261027_01_resident_departures.py")
+    ai_extraction = load_revision(root / "alembic" / "versions" / "20261028_01_openrouter_document_extraction.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
     application_id, application_file_id = uuid4(), uuid4()
@@ -71,15 +73,21 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         ocr.upgrade()
         file_blobs.op = ops
         file_blobs.upgrade()
+        departures.op = ops
+        departures.upgrade()
+        ai_extraction.op = ops
+        ai_extraction.upgrade()
         inspector = inspect(connection)
         expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
         assert expected <= set(inspector.get_table_names())
-        assert {"ocr_status", "ocr_text", "ocr_truncated"} <= {column["name"] for column in inspector.get_columns("application_files")}
-        ocr_backfill = connection.exec_driver_sql(
-            "SELECT ocr_status, ocr_text, ocr_truncated FROM application_files WHERE id = ?",
+        file_columns = {column["name"] for column in inspector.get_columns("application_files")}
+        assert {"ai_status", "extracted_data"} <= file_columns
+        assert not {"ocr_status", "ocr_text", "ocr_truncated"} & file_columns
+        ai_backfill = connection.exec_driver_sql(
+            "SELECT ai_status, extracted_data FROM application_files WHERE id = ?",
             (application_file_id.hex,),
         ).first()
-        assert ocr_backfill == ("NOT_CONFIGURED", None, 0)
+        assert ai_backfill == ("NOT_CONFIGURED", "{}")
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
         dormitory_id = connection.exec_driver_sql("SELECT dormitory_id FROM rooms WHERE number = '101'").scalar_one()
         dormitory_name = connection.exec_driver_sql("SELECT name FROM dormitories WHERE id = ?", (str(dormitory_id),)).scalar_one()
@@ -89,6 +97,8 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        ai_extraction.downgrade()
+        departures.downgrade()
         file_blobs.downgrade()
         ocr.downgrade()
         financial.downgrade()

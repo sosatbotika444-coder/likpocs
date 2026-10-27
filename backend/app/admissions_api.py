@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import asyncio
 import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
@@ -19,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit, notify
+from app.ai_extraction import extract_identity_document, openrouter_configured
 from app.billing import create_initial_period
 from app.config import settings
 from app.db import get_db
@@ -43,7 +43,6 @@ from app.models import (
     User,
     utcnow,
 )
-from app.ocr import OCRResult, extract_document_text, extract_identity_fields, ocr_configured
 from app.residency import assert_room_available, record_room_assignment
 from app.schemas import (
     ApplicationApproveIn,
@@ -306,6 +305,7 @@ def _public_campaign(campaign: AdmissionCampaign) -> PublicCampaignOut:
         document_types=campaign.document_types,
         consent_version=campaign.consent_version,
         consent_text=campaign.consent_text,
+        ai_processing_available=openrouter_configured(),
     )
 
 
@@ -867,7 +867,7 @@ def admission_settings(db: Session = Depends(get_db), user: User = Depends(get_c
         "default_period_days": default_period_days,
         "billing_change_allowed": settings.admins_can_adjust_billing,
         "uploads_enabled": storage_ready and (settings.environment != "production" or settings.file_retention_days is not None),
-        "ocr_configured": ocr_configured(),
+        "ai_configured": openrouter_configured(),
         "antivirus_configured": False,
     }
 
@@ -925,9 +925,8 @@ def delete_application_file(application_id: UUID, file_id: UUID, db: Session = D
     audit(db, user, "APPLICATION_FILE_DELETED", "ApplicationFile", attachment.id, {"kind": attachment.kind, "document_type": attachment.document_type})
     storage.delete(attachment.object_key, db=db)
     attachment.deleted_at = utcnow()
-    attachment.ocr_text = None
-    attachment.ocr_status = "DELETED"
-    attachment.ocr_truncated = False
+    attachment.extracted_data = {}
+    attachment.ai_status = "DELETED"
     db.commit()
     return Response(status_code=204)
 
@@ -1004,10 +1003,7 @@ def list_public_application_files(request: Request, db: Session = Depends(get_db
 
 
 def _public_file_out(row: ApplicationFile) -> ApplicationFileOut:
-    result = ApplicationFileOut.model_validate(row)
-    if row.kind == "DOCUMENT":
-        result = result.model_copy(update={"extracted_data": extract_identity_fields(row.ocr_text)})
-    return result
+    return ApplicationFileOut.model_validate(row)
 
 
 @public_router.post("/application/files", response_model=ApplicationFileOut, status_code=201)
@@ -1019,6 +1015,7 @@ async def upload_public_file(
     upload: UploadFile = File(...),
     db: Session = Depends(get_db),
     csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+    ai_processing_consent: bool = Header(default=False, alias="X-AI-Processing-Consent"),
 ) -> ApplicationFileOut:
     _rate_limit(db, request, "upload", 40, 3600)
     application, _ = _student_write_session(request, db, csrf_token)
@@ -1038,9 +1035,16 @@ async def upload_public_file(
     if kind == "DOCUMENT" and "document:" + document_type not in application.requested_fields and application.status == "NEEDS_INFO":
         raise HTTPException(status_code=403, detail="Ushbu hujjatni yangilash so‘ralmagan.")
     suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
-    ocr_result = OCRResult("SKIPPED")
-    if kind == "DOCUMENT":
-        ocr_result = await asyncio.to_thread(extract_document_text, content, content_type)
+    ai_status = "NOT_CONFIGURED"
+    extracted_data: dict[str, str] = {}
+    if kind == "DOCUMENT" and openrouter_configured():
+        if ai_processing_consent:
+            application.ai_processing_consented_at = utcnow()
+            ai_result = await extract_identity_document(content, content_type)
+            ai_status = ai_result.status
+            extracted_data = ai_result.data
+        else:
+            ai_status = "CONSENT_REQUIRED"
     object_key = f"admissions/{application.id}/{uuid4().hex}{suffix}"
     replacement_query = select(ApplicationFile).where(
         ApplicationFile.application_id == application.id,
@@ -1058,9 +1062,8 @@ async def upload_public_file(
         for previous in previous_files:
             previous.deleted_at = replaced_at
             previous.delete_after = replaced_at
-            previous.ocr_text = None
-            previous.ocr_status = "DELETED"
-            previous.ocr_truncated = False
+            previous.extracted_data = {}
+            previous.ai_status = "DELETED"
         uploaded_at = utcnow()
         retention = settings.file_retention_days
         row = ApplicationFile(
@@ -1072,9 +1075,8 @@ async def upload_public_file(
             content_type=content_type,
             size_bytes=len(content),
             scan_status="NOT_CONFIGURED",
-            ocr_status=ocr_result.status,
-            ocr_text=ocr_result.text,
-            ocr_truncated=ocr_result.truncated,
+            ai_status=ai_status,
+            extracted_data=extracted_data,
             delete_after=uploaded_at + timedelta(days=retention) if application.status == "DRAFT" and retention else None,
             uploaded_at=uploaded_at,
         )
@@ -1085,6 +1087,8 @@ async def upload_public_file(
             for previous in previous_files:
                 storage.delete(previous.object_key, db=db)
         audit(db, None, "APPLICATION_FILE_UPLOADED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
+        if kind == "DOCUMENT" and ai_processing_consent and openrouter_configured():
+            audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {"provider": "OpenRouter", "route": settings.openrouter_model})
         if previous_files:
             audit(db, None, "APPLICATION_FILE_REPLACED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
         db.commit()

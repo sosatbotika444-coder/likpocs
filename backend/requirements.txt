@@ -13,8 +13,7 @@ email-validator>=2.3,<3.0
 boto3>=1.40,<2.0
 Pillow>=11,<13
 PyMuPDF>=1.26,<2.0
-pytesseract>=0.3.13,<1.0
+httpx>=0.28,<1.0
 
 # Test dependencies
 pytest>=8.4,<9.0
-httpx>=0.28,<1.0

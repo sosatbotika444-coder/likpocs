@@ -20,7 +20,6 @@ from app.models import (
     Resident,
     StudentApplication,
 )
-from app.ocr import OCRResult
 
 
 def _png_bytes() -> bytes:
@@ -235,34 +234,61 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     assert database.scalar(select(func.count(BillingPeriod.id)).where(BillingPeriod.resident_id == resident.id)) == 1
 
 
-def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+def test_openrouter_suggestions_require_consent_and_are_private(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+    import json
+
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
-    monkeypatch.setattr("app.admissions_api.extract_document_text", lambda *_: OCRResult("COMPLETED", """Familiyasi / Surname
-KARIMOVA
-Ismi / Given names
-ISMOIL
-Otasining ismi / Patronymic
-ANVAR QIZI
-Tug‘ilgan sana
-11.04.2005"""))
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-only-key")
+    monkeypatch.setattr(settings, "openrouter_enabled", True)
+    calls = []
+
+    async def fake_openrouter(payload):
+        calls.append(payload)
+        return {"choices": [{"message": {"content": json.dumps({
+            "last_name_latin": "KARIMOVA",
+            "first_name_latin": "ISMOIL",
+            "middle_name_latin": "ANVAR QIZI",
+            "birth_date": "11.04.2005",
+            "phone": "+998000000000",
+        })}}]}
+
+    monkeypatch.setattr("app.ai_extraction._post_chat_completion", fake_openrouter)
     _, campaign, _, _, public_session = _workflow(client, operator_token, admin_token, document_types=["ID"])
     assert campaign["document_types"] == ["ID"]
     _fill_application(client, public_session)
-    upload = client.post(
+    file_payload = {
+        "data": {"kind": "DOCUMENT", "document_type": "ID"},
+        "files": {"upload": ("identity.png", _png_bytes(), "image/png")},
+    }
+    upload_without_consent = client.post(
         "/api/public/application/files",
         headers={"X-CSRF-Token": public_session["csrf_token"]},
+        **file_payload,
+    )
+    assert upload_without_consent.status_code == 201, upload_without_consent.text
+    assert upload_without_consent.json()["ai_status"] == "CONSENT_REQUIRED"
+    assert upload_without_consent.json()["extracted_data"] == {}
+    assert calls == []
+
+    upload = client.post(
+        "/api/public/application/files",
+        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true"},
         data={"kind": "DOCUMENT", "document_type": "ID"},
         files={"upload": ("identity.png", _png_bytes(), "image/png")},
     )
     assert upload.status_code == 201, upload.text
-    assert upload.json()["ocr_status"] == "COMPLETED"
-    assert "ocr_text" not in upload.json()
+    assert upload.json()["ai_status"] == "COMPLETED"
     assert upload.json()["extracted_data"] == {
         "last_name_latin": "KARIMOVA",
         "first_name_latin": "ISMOIL",
         "middle_name_latin": "ANVAR QIZI",
         "birth_date": "2005-04-11",
     }
+    assert calls[0]["model"] == "openrouter/free"
+    assert calls[0]["provider"]["data_collection"] == "deny"
+    assert calls[0]["provider"]["zdr"] is True
+    assert "ocr_text" not in upload.json()
+
     public_files = client.get("/api/public/application/files")
     assert public_files.status_code == 200
     assert all("ocr_text" not in file for file in public_files.json())
@@ -270,18 +296,21 @@ Tug‘ilgan sana
     assert public_document["extracted_data"] == upload.json()["extracted_data"]
 
     application = database.scalar(select(StudentApplication))
-    attachment = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.kind == "DOCUMENT"))
+    database.refresh(application)
+    assert application.ai_processing_consented_at is not None
+    attachment = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.kind == "DOCUMENT", ApplicationFile.deleted_at.is_(None)))
     admin = _headers(admin_token)
     detail = client.get(f"/api/admissions/applications/{application.id}", headers=admin)
     assert detail.status_code == 200, detail.text
     staff_file = next(file for file in detail.json()["files"] if file["id"] == str(attachment.id))
-    assert staff_file["ocr_text"].startswith("Familiyasi / Surname")
+    assert staff_file["ai_status"] == "COMPLETED"
+    assert staff_file["extracted_data"] == upload.json()["extracted_data"]
 
     removed = client.delete(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=admin)
     assert removed.status_code == 204
     database.refresh(attachment)
-    assert attachment.ocr_text is None
-    assert attachment.ocr_status == "DELETED"
+    assert attachment.extracted_data == {}
+    assert attachment.ai_status == "DELETED"
 
 
 def test_rejects_a_forged_image_instead_of_saving_it(client, database, operator_token, admin_token):

@@ -1,0 +1,5 @@
+# OpenRouter server configuration
+# Set this in the repository .env file or the hosting environment. Never commit a real key.
+OPENROUTER_API_KEY=your-key-here
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_REQUIRE_ZDR=true

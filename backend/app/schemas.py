@@ -433,6 +433,7 @@ class PublicCampaignOut(BaseModel):
     document_types: list[str]
     consent_version: str
     consent_text: str
+    ai_processing_available: bool = False
 
 
 class PublicSessionOut(BaseModel):
@@ -528,14 +529,13 @@ class ApplicationFileOut(ORMModel):
     content_type: str
     size_bytes: int
     scan_status: str
-    ocr_status: str
+    ai_status: str
     extracted_data: dict[str, str] = Field(default_factory=dict)
     uploaded_at: datetime
 
 
 class ApplicationFileStaffOut(ApplicationFileOut):
-    ocr_text: str | None
-    ocr_truncated: bool
+    pass
 
 
 class ApplicationStatusEventOut(ORMModel):

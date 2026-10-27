@@ -70,10 +70,10 @@ export type ApplicationData = {
 };
 type ApplicationFileBase = {
   id: string; kind: 'PHOTO' | 'DOCUMENT'; document_type: string; original_name: string;
-  content_type: string; size_bytes: number; scan_status: string; ocr_status: string; uploaded_at: string;
+  content_type: string; size_bytes: number; scan_status: string; ai_status: string; uploaded_at: string;
   extracted_data?: Record<string, string>;
 };
-export type ApplicationFile = ApplicationFileBase & { ocr_text: string | null; ocr_truncated: boolean };
+export type ApplicationFile = ApplicationFileBase;
 export type PublicApplicationFile = ApplicationFileBase;
 export type ApplicationEvent = { from_status: string; to_status: string; reason: string; created_at: string };
 export type Application = ApplicationData & {
@@ -86,9 +86,9 @@ export type ApplicationQueueItem = {
   id: string; reference: string; status: string; first_name_latin: string; last_name_latin: string;
   phone: string; campaign_id: string; dormitory_id: string; assigned_to: string | null; created_at: string;
 };
-export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string };
+export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string; ai_processing_available: boolean };
 export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string };
-export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ocr_configured: boolean; antivirus_configured: boolean };
+export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ai_configured: boolean; antivirus_configured: boolean };
 export type AdmissionSummary = {
   total_applications: number; applications_this_month: number; pending_applications: number;
   approved_applications: number; approved_this_month: number; rejected_applications: number; linked_residents: number;

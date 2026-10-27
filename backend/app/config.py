@@ -43,12 +43,10 @@ class Settings(BaseSettings):
     file_max_bytes: int = Field(default=10_485_760, ge=1024, le=104_857_600)
     file_max_image_pixels: int = Field(default=24_000_000, ge=1_000_000, le=100_000_000)
     public_app_url: str = "https://dormflows.netlify.app"
-    ocr_enabled: bool = True
-    ocr_binary: str = "tesseract"
-    ocr_languages: str = "uzb+uzb_cyrl+eng+rus"
-    ocr_max_pages: int = Field(default=5, ge=1, le=20)
-    ocr_page_timeout_seconds: int = Field(default=15, ge=1, le=60)
-    ocr_max_pixels: int = Field(default=18_000_000, ge=1_000_000, le=40_000_000)
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openrouter/free"
+    openrouter_enabled: bool = True
+    openrouter_require_zdr: bool = True
     s3_endpoint_url: str = ""
     s3_bucket: str = ""
     s3_region: str = "us-east-1"

@@ -40,7 +40,7 @@ const buttonGuides = [
       ['Taklif yaratish', 'Ariza kampaniyasi va maxsus havola yaratadi. Havola faqat yaratilganda ko‘rsatiladi; nusxasini xavfsiz saqlang.'],
       ['Yangi taklif · Havola yaratish', 'Faol kampaniya, havola tugash vaqti va arizalar limitini belgilang; yuborish uchun maxsus havola yaratiladi.'],
       ['Qidirish · holat · kampaniya', 'Arizalar navbatini toraytiradi; yangilash belgisi ro‘yxatni qayta yuklaydi.'],
-      ['Arizani ochish · Ko‘rish', 'Ariza, hujjatlar va tekshiruv ma’lumotlarini ko‘rsatadi. OCR matni xodim tekshiruvi uchun yordamchi natijadir.'],
+      ['Arizani ochish · Ko‘rish', 'Ariza, hujjatlar va AI taklif qilgan maydonlarni ko‘rsatadi. Qiymatlarni asl hujjat bilan solishtirib tekshiring.'],
       ['Tekshiruvni boshlash', 'Arizani ko‘rib chiqilmoqda holatiga o‘tkazadi.'],
       ['Tasdiqlash', 'Arizani tasdiqlaydi va kiritilgan xona hamda to‘lov shartlari bilan yashovchi profilini yaratadi.'],
       ['Yashovchini ochish', 'Tasdiqlangan arizadan yaratilgan profilni “Yashovchilar”da ochadi.'],

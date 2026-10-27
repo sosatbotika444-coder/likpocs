@@ -14,9 +14,10 @@ const statusLabels: Record<string, string> = {
   DRAFT: 'Qoralama', SUBMITTED: 'Yuborildi', IN_REVIEW: 'Tekshiruvda', NEEDS_INFO: 'Aniqlik kerak',
   APPROVED: 'Tasdiqlandi', REJECTED: 'Rad etildi', CANCELLED: 'Bekor qilindi', ARCHIVED: 'Arxiv',
 };
-const ocrStatusLabels: Record<string, string> = {
-  COMPLETED: 'Matn olindi', PARTIAL: 'Cheklangan natija', NO_TEXT: 'Matn topilmadi',
-  NOT_CONFIGURED: 'Sozlanmagan', FAILED: 'O‘qib bo‘lmadi', SKIPPED: 'Qo‘llanmaydi', DELETED: 'O‘chirildi',
+const aiStatusLabels: Record<string, string> = {
+  COMPLETED: 'Maydonlar topildi', NO_FIELDS: 'Ma\u2019lumot topilmadi',
+  NOT_CONFIGURED: 'AI sozlanmagan', CONSENT_REQUIRED: 'AI roziligi berilmagan',
+  FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
 };
 const dataLabels: Record<string, string> = {
   first_name_latin: 'Ism (lotin)', last_name_latin: 'Familiya (lotin)', middle_name_latin: 'Otasining ismi (lotin)',
@@ -55,6 +56,7 @@ function PublicIntake() {
   const [accessRequired, setAccessRequired] = useState(false);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [autofilledFields, setAutofilledFields] = useState<string[]>([]);
+  const [aiProcessingConsent, setAIProcessingConsent] = useState(false);
   const exchangeStarted = useRef(false);
   const isClarification = application?.status === 'NEEDS_INFO';
 
@@ -83,6 +85,7 @@ function PublicIntake() {
   const hydrate = (data: PublicApplication, campaignData: PublicCampaign, csrfToken: string) => {
     setApplication(data);
     setCampaign(campaignData);
+    setAIProcessingConsent(false);
     setCsrf(csrfToken);
     const values: Record<string, unknown> = { ...data };
     for (const field of publicDateFields) values[field] = data[field as keyof PublicApplication] ? dayjs(data[field as keyof PublicApplication] as string) : null;
@@ -187,12 +190,19 @@ function PublicIntake() {
     body.append('upload', file);
     try {
       const result = await api.post<PublicApplicationFile>('/public/application/files', body, {
-        headers: { 'X-CSRF-Token': csrf },
+        headers: { 'X-CSRF-Token': csrf, ...(kind === 'DOCUMENT' && aiProcessingConsent ? { 'X-AI-Processing-Consent': 'true' } : {}) },
         onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.round((event.loaded * 100) / event.total) : 45 })),
       });
       setFiles((current) => [...current.filter((item) => !(item.kind === kind && (kind === 'PHOTO' || item.document_type === documentType))), result.data]);
       const filled = applyExtractedData([result.data]);
-      notice.success({ message: filled.length ? `Hujjat yuklandi. ${filled.length} ta maydon to‘ldirildi.` : 'Hujjat xavfsiz saqlandi.', description: filled.length ? 'Ma’lumotlarni tekshirib chiqing.' : undefined });
+      const message = filled.length
+        ? `Hujjat yuklandi. ${filled.length} ta maydon to’ldirildi.`
+        : result.data.ai_status === 'CONSENT_REQUIRED'
+          ? 'Hujjat saqlandi. Avtomatik to’ldirish uchun AI roziligini belgilang.'
+          : result.data.ai_status === 'FAILED'
+            ? 'Hujjat saqlandi, AI tahlili bajarilmadi. Maydonlarni qo’lda to’ldiring.'
+            : 'Hujjat xavfsiz saqlandi.';
+      notice.success({ message, description: filled.length ? 'Ma’lumotlarni hujjat bilan solishtirib tekshiring.' : undefined });
     } catch (error) { notice.error({ message: 'Fayl yuklanmadi', description: errorMessage(error) }); }
     finally { setProgress((current) => { const nextValue = { ...current }; delete nextValue[key]; return nextValue; }); }
   };
@@ -225,6 +235,8 @@ function PublicIntake() {
     {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>)}
   </div>;
 
+
+  const aiConsentControl = campaign.ai_processing_available ? <div className="ai-consent-box"><Alert type="warning" showIcon message="Avtomatik to’ldirish OpenRouter orqali ishlaydi" description="Rozilik bersangiz, hujjat sahifalari OpenRouter orqali tashqi AI provayderiga uzatiladi. AI topgan qiymatlar ariza maydonlariga qo’yiladi. Roziliksiz ham faylni yuklab, ma’lumotlarni qo’lda kiritishingiz mumkin."/><Checkbox checked={aiProcessingConsent} onChange={(event)=>setAIProcessingConsent(event.target.checked)}>Hujjatimni OpenRouter orqali tashqi AI provayderida tahlil qilishga roziman.</Checkbox></div> : null;
   const renderRequestedInputs = () => <div className="form-grid">{application.requested_fields.filter((field) => !field.startsWith('document:') && field !== 'photo').map((field) => {
     const custom = customFields.find((item) => item.key === field);
     if (custom) return <Form.Item key={field} name={field} label={custom.label} rules={[{required:custom.required}]}>{custom.kind === 'select' ? <Select options={custom.options.map((option)=>({value:option,label:option}))}/> : custom.kind === 'checkbox' ? <Checkbox/> : custom.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>;
@@ -238,8 +250,8 @@ function PublicIntake() {
     {!isClarification && autofilledFields.length > 0 && <Alert type="success" showIcon message={`Hujjatdan ${autofilledFields.length} ta maydon to‘ldirildi`} description={`Tekshiring: ${autofilledFields.map((field) => dataLabels[field] || field).join(', ')}.`} action={step > 0 ? <Button size="small" type="link" onClick={() => setStep(0)}>Maydonlarni ko‘rish</Button> : undefined}/>}
     {!isClarification && <><Steps current={step} size="small" items={[{title:'Shaxsiy ma’lumot'},{title:'O‘qish va muddat'},{title:'Fayllar va rozilik'}]}/><div className="public-progress-label">{step + 1} / 3</div></>}
     <Form form={form} layout="vertical" onFinish={(values) => void submit(values)}>
-      {isClarification ? <><h2>So‘ralgan maydonlar</h2>{renderRequestedInputs()}<h2>Fayllar</h2>{fileButtons(true)}</> : <>
-        {step === 0 && <>{identityDocumentType && <div className="identity-document-box"><strong>Vaqtingizni tejang</strong><p>Pasport yoki ID kartani yuklang. O‘qilgan ism, familiya va boshqa topilgan ma’lumotlar maydonlarga tushadi. Ularni tekshirib, qolganini o‘zingiz kiriting.</p>{fileButtons(false, false, [identityDocumentType])}</div>}<div className="form-grid">
+      {isClarification ? <><h2>So‘ralgan maydonlar</h2>{renderRequestedInputs()}{aiConsentControl}<h2>Fayllar</h2>{fileButtons(true)}</> : <>
+        {step === 0 && <>{identityDocumentType && <div className="identity-document-box"><strong>Vaqtingizni tejang</strong>{aiConsentControl}<p>Pasport yoki ID kartani yuklang. O‘qilgan ism, familiya va boshqa topilgan ma’lumotlar maydonlarga tushadi. Ularni tekshirib, qolganini o‘zingiz kiriting.</p>{fileButtons(false, false, [identityDocumentType])}</div>}<div className="form-grid">
           <Form.Item name="first_name_latin" label="Ism (lotin)" rules={[{required:true,message:'Ismingizni kiriting.'}]}><Input autoComplete="given-name" maxLength={80}/></Form.Item><Form.Item name="last_name_latin" label="Familiya (lotin)" rules={[{required:true,message:'Familiyangizni kiriting.'}]}><Input autoComplete="family-name" maxLength={100}/></Form.Item>
           <Form.Item name="middle_name_latin" label="Otasining ismi (lotin)"><Input maxLength={100}/></Form.Item><Form.Item name="birth_date" label="Tug‘ilgan sana" rules={[{required:true,message:'Tug‘ilgan sanani tanlang.'}]}><DatePicker className="full-width" format="DD.MM.YYYY"/></Form.Item>
           <Form.Item name="first_name_cyrillic" label="Ism (kirill)"><Input maxLength={80}/></Form.Item><Form.Item name="last_name_cyrillic" label="Familiya (kirill)"><Input maxLength={100}/></Form.Item><Form.Item name="middle_name_cyrillic" label="Otasining ismi (kirill)"><Input maxLength={100}/></Form.Item><Form.Item name="nationality" label="Fuqarolik"><Input maxLength={100}/></Form.Item>
@@ -247,7 +259,7 @@ function PublicIntake() {
           <Form.Item name="emergency_name" label="Favqulodda aloqa uchun yaqin inson"><Input maxLength={160}/></Form.Item><Form.Item name="emergency_phone" label="Favqulodda telefon"><Input type="tel" maxLength={40}/></Form.Item>
         </div></>}
         {step === 1 && <div className="form-grid"><Form.Item name="institution" label="Ta’lim muassasasi" rules={[{required:true,message:'Ta’lim muassasasini kiriting.'}]}><Input maxLength={200}/></Form.Item><Form.Item name="faculty" label="Fakultet yoki yo‘nalish"><Input maxLength={160}/></Form.Item><Form.Item name="course" label="Kurs"><Input maxLength={40}/></Form.Item><Form.Item name="study_group" label="Guruh"><Input maxLength={80}/></Form.Item><Form.Item name="study_start" label="O‘qish davri boshlanishi"><DatePicker className="full-width"/></Form.Item><Form.Item name="study_end" label="O‘qish davri tugashi"><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_in" label="Ko‘chib kirish sanasi" rules={[{required:true,message:'Taxminiy sanani kiriting.'}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_out" label="Ko‘chib chiqish sanasi"><DatePicker className="full-width"/></Form.Item><Form.Item name="preferences" label="Joylashish bo‘yicha istaklar" className="form-span"><Input.TextArea rows={3} maxLength={2000}/></Form.Item>{customFields.map((field) => <Form.Item key={field.key} name={field.key} label={field.label} valuePropName={field.kind === 'checkbox' ? 'checked' : 'value'} rules={field.required ? [field.kind === 'checkbox' ? {validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Ushbu maydonni belgilang.'))} : {required:true}] : []}>{field.kind === 'select' ? <Select options={field.options.map((option)=>({value:option,label:option}))}/> : field.kind === 'checkbox' ? <Checkbox/> : field.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>)}</div>}
-        {step === 2 && <><Alert type="info" showIcon message="Hujjatdan ayrim maydonlar to‘ldirilishi mumkin" description="Topilgan ma’lumotlarni tekshiring. Hujjat xodim tomonidan alohida ko‘rib chiqiladi."/><h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
+        {step === 2 && <><Alert type="info" showIcon message="Hujjatdan ayrim maydonlar to’ldirilishi mumkin" description="Topilgan ma’lumotlarni hujjat bilan solishtiring. Ariza avtomatik tasdiqlanmaydi."/>{aiConsentControl}<h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
       </>}
       <div className="public-form-actions">{step > 0 && !isClarification && <Button onClick={() => setStep((current)=>Math.max(0,current-1))}>Orqaga</Button>}{step < 2 && !isClarification ? <Button type="primary" onClick={() => void next()} loading={busy}>Saqlash va davom etish</Button> : <Button type="primary" htmlType="submit" loading={busy}>{isClarification ? 'Javobni yuborish' : 'Arizani yuborish'}</Button>}</div>
     </Form>
@@ -397,7 +409,7 @@ function StaffAdmissions() {
   const fileColumns = [
     {title:'Fayl',dataIndex:'original_name',render:(value:string,file:ApplicationFile)=><div><strong>{value}</strong><div><Text type="secondary">{file.kind==='PHOTO'?'Surat':file.document_type} · {Math.ceil(file.size_bytes/1024)} KB</Text></div></div>},
     {title:'Virus tekshiruvi',dataIndex:'scan_status',render:(value:string)=><Tag>{value==='NOT_CONFIGURED'?'Tekshirilmagan':value}</Tag>},
-    {title:'OCR',dataIndex:'ocr_status',render:(value:string,file:ApplicationFile)=><div><Tag color={value==='COMPLETED'?'green':value==='PARTIAL'?'orange':'default'}>{ocrStatusLabels[value]||value}</Tag>{file.ocr_text&&<details className="ocr-result"><summary>Ko‘rilgan matn</summary><pre>{file.ocr_text}</pre>{file.ocr_truncated&&<Text type="secondary">Matn yoki sahifalar cheklov sabab qisqartirildi.</Text>}<Text type="secondary">OCR xulosasini asl hujjat bilan solishtirib tekshiring.</Text></details>}</div>},
+    {title:'AI taklifi',dataIndex:'ai_status',render:(value:string,file:ApplicationFile)=><div><Tag color={value==='COMPLETED'?'green':value==='FAILED'?'red':'default'}>{aiStatusLabels[value]||value}</Tag>{Object.keys(file.extracted_data||{}).length>0&&<details className="ai-result"><summary>{Object.keys(file.extracted_data||{}).length} ta maydon</summary>{Object.entries(file.extracted_data||{}).map(([key,item])=><div key={key}><strong>{dataLabels[key]||key}: </strong>{item}</div>)}<Text type="secondary">Topilgan qiymatlarni asl hujjat bilan solishtiring.</Text></details>}</div>},
     {title:'',align:'right' as const,render:(_:unknown,file:ApplicationFile)=><Button icon={<DownloadOutlined/>} onClick={()=>void download(file)}>Himoyalangan ko‘rish</Button>},
   ];
   const dormitoryColumns = [
@@ -439,7 +451,7 @@ function StaffAdmissions() {
 
   return <div className="page-stack">{holder}
     <PageHeading eyebrow="TALABALAR BILAN ISHLASH" title="Qabul va arizalar" subtitle="Takliflar, arizalar va joylashtirishni bitta navbatda boshqaring." action="Taklif yaratish" onAction={()=>{inviteForm.setFieldsValue({max_submissions:25});setInviteOpen(true);}}/>
-    {settings && <div className="admission-status-strip"><span>Fayl ombori: <strong>{settings.storage_configured?'tayyor':'sozlanmagan'}</strong></span><span>Saqlash muddati: <strong>{settings.retention_days ? `${settings.retention_days} kun` : 'belgilanmagan'}</strong></span><span>OCR: <strong>{settings.ocr_configured?'tayyor':'sozlanmagan'}</strong></span><span>Antivirus: <strong>{settings.antivirus_configured?'tayyor':'sozlanmagan'}</strong></span></div>}
+    {settings && <div className="admission-status-strip"><span>Fayl ombori: <strong>{settings.storage_configured?'tayyor':'sozlanmagan'}</strong></span><span>Saqlash muddati: <strong>{settings.retention_days ? `${settings.retention_days} kun` : 'belgilanmagan'}</strong></span><span>AI: <strong>{settings.ai_configured?'sozlangan':'sozlanmagan'}</strong></span><span>Antivirus: <strong>{settings.antivirus_configured?'tayyor':'sozlanmagan'}</strong></span></div>}
     {!settings?.uploads_enabled && <Alert type="warning" showIcon message="Fayl yuklash sozlamalarini tekshiring" description="Yuklash uchun xususiy fayl ombori va saqlash muddati sozlangan bo‘lishi kerak."/>}
     <Tabs items={[
       {key:'statistics',label:'Statistika',children:statisticsPanel},
@@ -449,7 +461,7 @@ function StaffAdmissions() {
     ]}/>
 
     <Drawer open={Boolean(detail)} onClose={()=>setDetail(null)} width={Math.min(780,window.innerWidth-20)} title={detail ? `${detail.reference} · ${statusLabels[detail.status]||detail.status}` : ''} extra={detail && <Space>{canDecide && detail.status==='SUBMITTED' && <Button onClick={()=>void api.post(`/admissions/applications/${detail.id}/start-review`).then(refreshDetail).catch((error:unknown)=>notice.error({message:errorMessage(error)}))}>Tekshiruvni boshlash</Button>}{canDecide && <Button type="primary" onClick={()=>{actionForm.resetFields();setActionKind('approve');actionForm.setFieldsValue({move_in:detail.requested_move_in?dayjs(detail.requested_move_in):dayjs(),payment_period_days:settings?.default_period_days||30});}}>Tasdiqlash</Button>}{detail.status==='APPROVED'&&detail.resident_id&&<Button onClick={()=>navigate('/residents?resident_id='+detail.resident_id)}>Yashovchini ochish</Button>}</Space>}>
-      {detail && <div className="detail-stack admission-detail">{holder}<div>{statusTag(detail.status)} <Text type="secondary">Yuborildi: {formatDate(detail.created_at.slice(0,10),true)}</Text></div><Alert type="info" showIcon message={settings?.ocr_configured?'OCR xodim uchun yordamchi vosita sifatida yoqilgan':'OCR mavjud emas; hujjatni qo‘lda tekshiring'} description="OCR matni faqat xodimga ko‘rinadi. Har bir xulosa asl hujjat bilan solishtiriladi va avtomatik qaror qabul qilinmaydi."/><Descriptions bordered size="small" column={2} items={[
+      {detail && <div className="detail-stack admission-detail">{holder}<div>{statusTag(detail.status)} <Text type="secondary">Yuborildi: {formatDate(detail.created_at.slice(0,10),true)}</Text></div><Alert type="info" showIcon message="AI topgan maydonlar xodimga yordamchi taklif sifatida ko’rsatiladi" description="Har bir qiymatni asl hujjat bilan solishtiring. Yakuniy qarorni xodim qabul qiladi."/><Descriptions bordered size="small" column={2} items={[
         {key:'name',label:'F.I.Sh. (lotin)',children:`${detail.last_name_latin} ${detail.first_name_latin} ${detail.middle_name_latin}`},{key:'name_cyr',label:'F.I.Sh. (kirill)',children:`${detail.last_name_cyrillic} ${detail.first_name_cyrillic} ${detail.middle_name_cyrillic}`},
         {key:'dob',label:'Tug‘ilgan sana',children:formatDate(detail.birth_date,true)},{key:'phone',label:'Telefon',children:detail.phone},{key:'email',label:'Pochta',children:detail.email||'—'},
         {key:'address',label:'Manzil',children:detail.address||'—'},{key:'emergency',label:'Favqulodda aloqa',children:`${detail.emergency_name||'—'} · ${detail.emergency_phone||'—'}`},
