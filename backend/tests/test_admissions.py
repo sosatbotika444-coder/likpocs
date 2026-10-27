@@ -237,7 +237,14 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
 
 def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
-    monkeypatch.setattr("app.admissions_api.extract_document_text", lambda *_: OCRResult("COMPLETED", "STUDENT: Aziza Karimova"))
+    monkeypatch.setattr("app.admissions_api.extract_document_text", lambda *_: OCRResult("COMPLETED", """Familiyasi / Surname
+KARIMOVA
+Ismi / Given names
+ISMOIL
+Otasining ismi / Patronymic
+ANVAR QIZI
+Tug‘ilgan sana
+11.04.2005"""))
     _, campaign, _, _, public_session = _workflow(client, operator_token, admin_token, document_types=["ID"])
     assert campaign["document_types"] == ["ID"]
     _fill_application(client, public_session)
@@ -250,9 +257,17 @@ def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client,
     assert upload.status_code == 201, upload.text
     assert upload.json()["ocr_status"] == "COMPLETED"
     assert "ocr_text" not in upload.json()
+    assert upload.json()["extracted_data"] == {
+        "last_name_latin": "KARIMOVA",
+        "first_name_latin": "ISMOIL",
+        "middle_name_latin": "ANVAR QIZI",
+        "birth_date": "2005-04-11",
+    }
     public_files = client.get("/api/public/application/files")
     assert public_files.status_code == 200
     assert all("ocr_text" not in file for file in public_files.json())
+    public_document = next(file for file in public_files.json() if file["kind"] == "DOCUMENT")
+    assert public_document["extracted_data"] == upload.json()["extracted_data"]
 
     application = database.scalar(select(StudentApplication))
     attachment = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.kind == "DOCUMENT"))
@@ -260,7 +275,7 @@ def test_ocr_text_is_only_returned_to_staff_and_is_removed_with_the_file(client,
     detail = client.get(f"/api/admissions/applications/{application.id}", headers=admin)
     assert detail.status_code == 200, detail.text
     staff_file = next(file for file in detail.json()["files"] if file["id"] == str(attachment.id))
-    assert staff_file["ocr_text"] == "STUDENT: Aziza Karimova"
+    assert staff_file["ocr_text"].startswith("Familiyasi / Surname")
 
     removed = client.delete(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=admin)
     assert removed.status_code == 204

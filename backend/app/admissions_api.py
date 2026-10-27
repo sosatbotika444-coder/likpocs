@@ -43,7 +43,7 @@ from app.models import (
     User,
     utcnow,
 )
-from app.ocr import OCRResult, extract_document_text, ocr_configured
+from app.ocr import OCRResult, extract_document_text, extract_identity_fields, ocr_configured
 from app.residency import assert_room_available, record_room_assignment
 from app.schemas import (
     ApplicationApproveIn,
@@ -1000,7 +1000,14 @@ def update_public_application(payload: ApplicationDraftIn, request: Request, db:
 def list_public_application_files(request: Request, db: Session = Depends(get_db)) -> list[ApplicationFileOut]:
     application, _ = _student_session(request, db)
     rows = db.scalars(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.deleted_at.is_(None)).order_by(ApplicationFile.uploaded_at)).all()
-    return [ApplicationFileOut.model_validate(row) for row in rows]
+    return [_public_file_out(row) for row in rows]
+
+
+def _public_file_out(row: ApplicationFile) -> ApplicationFileOut:
+    result = ApplicationFileOut.model_validate(row)
+    if row.kind == "DOCUMENT":
+        result = result.model_copy(update={"extracted_data": extract_identity_fields(row.ocr_text)})
+    return result
 
 
 @public_router.post("/application/files", response_model=ApplicationFileOut, status_code=201)
@@ -1097,7 +1104,7 @@ async def upload_public_file(
             except Exception:
                 # The replacement row is committed; the scheduled purge retries the old private object.
                 continue
-    return ApplicationFileOut.model_validate(row)
+    return _public_file_out(row)
 
 
 @public_router.post("/application/submit")

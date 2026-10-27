@@ -54,8 +54,31 @@ function PublicIntake() {
   const [codeEntry, setCodeEntry] = useState('');
   const [accessRequired, setAccessRequired] = useState(false);
   const [progress, setProgress] = useState<Record<string, number>>({});
+  const [autofilledFields, setAutofilledFields] = useState<string[]>([]);
   const exchangeStarted = useRef(false);
   const isClarification = application?.status === 'NEEDS_INFO';
+
+  const applyExtractedData = (uploadedFiles: PublicApplicationFile[]) => {
+    const values: Record<string, unknown> = {};
+    const filled: string[] = [];
+    for (const file of uploadedFiles) {
+      if (file.kind !== 'DOCUMENT') continue;
+      for (const [field, extracted] of Object.entries(file.extracted_data || {})) {
+        if (!extracted || !(field in dataLabels) || field in values) continue;
+        const existing = form.getFieldValue(field);
+        if (existing !== undefined && existing !== null && existing !== '') continue;
+        const value = field === 'birth_date' ? dayjs(extracted) : extracted;
+        if (dayjs.isDayjs(value) && !value.isValid()) continue;
+        values[field] = value;
+        filled.push(field);
+      }
+    }
+    if (filled.length) {
+      form.setFieldsValue(values as never);
+      setAutofilledFields((current) => [...new Set([...current, ...filled])]);
+    }
+    return filled;
+  };
 
   const hydrate = (data: PublicApplication, campaignData: PublicCampaign, csrfToken: string) => {
     setApplication(data);
@@ -68,6 +91,7 @@ function PublicIntake() {
       values[field.key] = field.kind === 'date' && value ? dayjs(String(value)) : value;
     }
     form.setFieldsValue(values as never);
+    setAutofilledFields([]);
     setAccessRequired(false);
   };
 
@@ -76,6 +100,7 @@ function PublicIntake() {
     hydrate(result.data.application, result.data.campaign, result.data.csrf_token);
     const uploaded = await api.get<PublicApplicationFile[]>('/public/application/files');
     setFiles(uploaded.data);
+    applyExtractedData(uploaded.data);
   };
 
   useEffect(() => {
@@ -88,7 +113,12 @@ function PublicIntake() {
       const draftKey = sessionStorage.getItem(keyName) || crypto.randomUUID();
       sessionStorage.setItem(keyName, draftKey);
       void api.post<{ csrf_token: string; campaign: PublicCampaign; application: PublicApplication }>('/public/invitations/exchange', { token, draft_key: draftKey })
-        .then(async (result) => { hydrate(result.data.application, result.data.campaign, result.data.csrf_token); setFiles((await api.get<PublicApplicationFile[]>('/public/application/files')).data); })
+        .then(async (result) => {
+          hydrate(result.data.application, result.data.campaign, result.data.csrf_token);
+          const uploaded = (await api.get<PublicApplicationFile[]>('/public/application/files')).data;
+          setFiles(uploaded);
+          applyExtractedData(uploaded);
+        })
         .catch((error: unknown) => { setAccessRequired(true); notice.error({ message: 'Taklif havolasi ochilmadi', description: errorMessage(error) }); })
         .finally(() => setLoading(false));
     } else {
@@ -161,7 +191,8 @@ function PublicIntake() {
         onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.round((event.loaded * 100) / event.total) : 45 })),
       });
       setFiles((current) => [...current.filter((item) => !(item.kind === kind && (kind === 'PHOTO' || item.document_type === documentType))), result.data]);
-      notice.success({ message: 'Fayl xavfsiz saqlandi.' });
+      const filled = applyExtractedData([result.data]);
+      notice.success({ message: filled.length ? `Hujjat yuklandi. ${filled.length} ta maydon to‘ldirildi.` : 'Hujjat xavfsiz saqlandi.', description: filled.length ? 'Ma’lumotlarni tekshirib chiqing.' : undefined });
     } catch (error) { notice.error({ message: 'Fayl yuklanmadi', description: errorMessage(error) }); }
     finally { setProgress((current) => { const nextValue = { ...current }; delete nextValue[key]; return nextValue; }); }
   };
@@ -181,16 +212,17 @@ function PublicIntake() {
   };
 
   const customFields = campaign?.custom_fields || [];
+  const identityDocumentType = campaign?.document_types.find((item) => item === 'ID') || campaign?.document_types.find((item) => item !== 'STUDY_PROOF');
   const isFileRequested = (key: string) => !isClarification || application?.requested_fields.includes(key);
 
   if (loading) return <main className="public-page"><Spin size="large"/></main>;
   if (accessCode && application) return <main className="public-page"><div className="public-card">{holder}<div className="eyebrow">ARIZA YUBORILDI</div><h1>Arizangiz qabul qilindi</h1><p>Ariza raqami: <strong>{application.reference}</strong></p><Alert type="warning" showIcon message="Kirish kodini xavfsiz joyda saqlang" description="Kod faqat shu oynada ko‘rsatiladi. Ariza holatini ko‘rish va aniqliklarga javob berish uchun kerak bo‘ladi."/><div className="access-code"><code>{accessCode}</code><Button icon={<CopyOutlined/>} onClick={() => void copyText(accessCode).then(() => notice.success({message:'Kod nusxalandi.'}))}>Nusxalash</Button></div><Button type="primary" block onClick={() => setAccessCode('')}>Kod saqlandi</Button></div></main>;
-  if (application && ['SUBMITTED', 'IN_REVIEW', 'APPROVED', 'REJECTED', 'CANCELLED', 'ARCHIVED'].includes(application.status)) return <main className="public-page"><div className="public-card">{holder}<div className="eyebrow">DORMFLOW / QABUL</div><h1>Ariza holati</h1><p>Ariza raqami: <strong>{application.reference}</strong></p><Alert type={application.status === 'REJECTED' ? 'error' : application.status === 'APPROVED' ? 'success' : 'info'} showIcon message={statusLabels[application.status] || application.status} description={application.review_reason || 'Arizangiz xodim tomonidan korib chiqiladi.'}/></div></main>;
-  if (accessRequired || !application || !campaign) return <main className="public-page"><div className="public-card">{holder}<div className="eyebrow">DORMFLOW · QABUL</div><h1>Ariza holatini tekshirish</h1><p>Taklif havolasini oching yoki ariza yuborilganda berilgan kirish kodini kiriting.</p><Form layout="vertical" onFinish={() => void enterWithCode()}><Form.Item label="Kirish kodi" required><Input value={codeEntry} onChange={(event) => setCodeEntry(event.target.value)} autoComplete="one-time-code"/></Form.Item><Button type="primary" htmlType="submit" loading={busy} block>Kodni tekshirish</Button></Form></div></main>;
+  if (application && ['SUBMITTED', 'IN_REVIEW', 'APPROVED', 'REJECTED', 'CANCELLED', 'ARCHIVED'].includes(application.status)) return <main className="public-page"><div className="public-card">{holder}<div className="eyebrow">RS BEST HOSTEL · QABUL</div><h1>Ariza holati</h1><p>Ariza raqami: <strong>{application.reference}</strong></p><Alert type={application.status === 'REJECTED' ? 'error' : application.status === 'APPROVED' ? 'success' : 'info'} showIcon message={statusLabels[application.status] || application.status} description={application.review_reason || 'Arizangiz xodim tomonidan ko‘rib chiqiladi.'}/></div></main>;
+  if (accessRequired || !application || !campaign) return <main className="public-page"><div className="public-card">{holder}<div className="eyebrow">RS BEST HOSTEL · QABUL</div><h1>Ariza holatini tekshirish</h1><p>Taklif havolasini oching yoki ariza yuborilganda berilgan kirish kodini kiriting.</p><Form layout="vertical" onFinish={() => void enterWithCode()}><Form.Item label="Kirish kodi" required><Input value={codeEntry} onChange={(event) => setCodeEntry(event.target.value)} autoComplete="one-time-code"/></Form.Item><Button type="primary" htmlType="submit" loading={busy} block>Kodni tekshirish</Button></Form></div></main>;
 
-  const fileButtons = (requestedOnly: boolean) => <div className="public-upload-list">
-    {(!requestedOnly || isFileRequested('photo')) && <section className="public-upload-item"><div><strong>Yashovchi surati</strong><small>Kamera bilan oling yoki rasm yuklang. Yuzni aniqlash bajarilmaydi.</small></div><label className="upload-control"><input type="file" accept="image/jpeg,image/png,image/webp" capture="user" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'PHOTO'); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'PHOTO') ? 'Suratni almashtirish' : 'Surat tanlash'}</span></label>{progress.PHOTO !== undefined && <Progress percent={progress.PHOTO} size="small"/>}{files.filter((item) => item.kind === 'PHOTO').map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>}
-    {campaign.document_types.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>)}
+  const fileButtons = (requestedOnly: boolean, includePhoto = true, documentTypes = campaign.document_types) => <div className="public-upload-list">
+    {includePhoto && (!requestedOnly || isFileRequested('photo')) && <section className="public-upload-item"><div><strong>Yashovchi surati</strong><small>Kamera bilan oling yoki rasm yuklang.</small></div><label className="upload-control"><input type="file" accept="image/jpeg,image/png,image/webp" capture="user" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'PHOTO'); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'PHOTO') ? 'Suratni almashtirish' : 'Surat tanlash'}</span></label>{progress.PHOTO !== undefined && <Progress percent={progress.PHOTO} size="small"/>}{files.filter((item) => item.kind === 'PHOTO').map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>}
+    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>)}
   </div>;
 
   const renderRequestedInputs = () => <div className="form-grid">{application.requested_fields.filter((field) => !field.startsWith('document:') && field !== 'photo').map((field) => {
@@ -201,20 +233,21 @@ function PublicIntake() {
     return <Form.Item key={field} name={field} label={dataLabels[field]}>{publicDateFields.includes(field) ? <DatePicker className="full-width"/> : field === 'gender' ? <Select options={[{value:'FEMALE',label:'Ayol'},{value:'MALE',label:'Erkak'}]}/> : <Input/>}</Form.Item>;
   })}</div>;
 
-  return <main className="public-page"><div className="public-card public-card-wide">{holder}<div className="eyebrow">DORMFLOW · {campaign.name.toLocaleUpperCase('uz-UZ')}</div><h1>{isClarification ? 'Arizani to‘ldiring' : 'Yotoqxonaga ariza'}</h1>
+  return <main className="public-page"><div className="public-card public-card-wide">{holder}<div className="eyebrow">RS BEST HOSTEL · {campaign.name.toLocaleUpperCase('uz-UZ')}</div><h1>{isClarification ? 'Arizani to‘ldiring' : 'Yotoqxonaga ariza'}</h1>
     {isClarification && <Alert type="warning" showIcon message="Qo‘shimcha ma’lumot so‘raldi" description={application.review_reason}/>}
+    {!isClarification && autofilledFields.length > 0 && <Alert type="success" showIcon message={`Hujjatdan ${autofilledFields.length} ta maydon to‘ldirildi`} description={`Tekshiring: ${autofilledFields.map((field) => dataLabels[field] || field).join(', ')}.`} action={step > 0 ? <Button size="small" type="link" onClick={() => setStep(0)}>Maydonlarni ko‘rish</Button> : undefined}/>}
     {!isClarification && <><Steps current={step} size="small" items={[{title:'Shaxsiy ma’lumot'},{title:'O‘qish va muddat'},{title:'Fayllar va rozilik'}]}/><div className="public-progress-label">{step + 1} / 3</div></>}
     <Form form={form} layout="vertical" onFinish={(values) => void submit(values)}>
       {isClarification ? <><h2>So‘ralgan maydonlar</h2>{renderRequestedInputs()}<h2>Fayllar</h2>{fileButtons(true)}</> : <>
-        {step === 0 && <div className="form-grid">
+        {step === 0 && <>{identityDocumentType && <div className="identity-document-box"><strong>Vaqtingizni tejang</strong><p>Pasport yoki ID kartani yuklang. O‘qilgan ism, familiya va boshqa topilgan ma’lumotlar maydonlarga tushadi. Ularni tekshirib, qolganini o‘zingiz kiriting.</p>{fileButtons(false, false, [identityDocumentType])}</div>}<div className="form-grid">
           <Form.Item name="first_name_latin" label="Ism (lotin)" rules={[{required:true,message:'Ismingizni kiriting.'}]}><Input autoComplete="given-name" maxLength={80}/></Form.Item><Form.Item name="last_name_latin" label="Familiya (lotin)" rules={[{required:true,message:'Familiyangizni kiriting.'}]}><Input autoComplete="family-name" maxLength={100}/></Form.Item>
           <Form.Item name="middle_name_latin" label="Otasining ismi (lotin)"><Input maxLength={100}/></Form.Item><Form.Item name="birth_date" label="Tug‘ilgan sana" rules={[{required:true,message:'Tug‘ilgan sanani tanlang.'}]}><DatePicker className="full-width" format="DD.MM.YYYY"/></Form.Item>
           <Form.Item name="first_name_cyrillic" label="Ism (kirill)"><Input maxLength={80}/></Form.Item><Form.Item name="last_name_cyrillic" label="Familiya (kirill)"><Input maxLength={100}/></Form.Item><Form.Item name="middle_name_cyrillic" label="Otasining ismi (kirill)"><Input maxLength={100}/></Form.Item><Form.Item name="nationality" label="Fuqarolik"><Input maxLength={100}/></Form.Item>
           <Form.Item name="gender" label="Jins (ixtiyoriy)"><Select allowClear options={[{value:'FEMALE',label:'Ayol'},{value:'MALE',label:'Erkak'}]}/></Form.Item><Form.Item name="phone" label="Telefon" rules={[{required:true,message:'Telefon raqamini kiriting.'}]}><Input type="tel" autoComplete="tel" placeholder="+998 90 123 45 67" maxLength={40}/></Form.Item><Form.Item name="email" label="Elektron pochta"><Input type="email" autoComplete="email" maxLength={320}/></Form.Item><Form.Item name="address" label="Manzil"><Input maxLength={500}/></Form.Item>
           <Form.Item name="emergency_name" label="Favqulodda aloqa uchun yaqin inson"><Input maxLength={160}/></Form.Item><Form.Item name="emergency_phone" label="Favqulodda telefon"><Input type="tel" maxLength={40}/></Form.Item>
-        </div>}
+        </div></>}
         {step === 1 && <div className="form-grid"><Form.Item name="institution" label="Ta’lim muassasasi" rules={[{required:true,message:'Ta’lim muassasasini kiriting.'}]}><Input maxLength={200}/></Form.Item><Form.Item name="faculty" label="Fakultet yoki yo‘nalish"><Input maxLength={160}/></Form.Item><Form.Item name="course" label="Kurs"><Input maxLength={40}/></Form.Item><Form.Item name="study_group" label="Guruh"><Input maxLength={80}/></Form.Item><Form.Item name="study_start" label="O‘qish davri boshlanishi"><DatePicker className="full-width"/></Form.Item><Form.Item name="study_end" label="O‘qish davri tugashi"><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_in" label="Ko‘chib kirish sanasi" rules={[{required:true,message:'Taxminiy sanani kiriting.'}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_out" label="Ko‘chib chiqish sanasi"><DatePicker className="full-width"/></Form.Item><Form.Item name="preferences" label="Joylashish bo‘yicha istaklar" className="form-span"><Input.TextArea rows={3} maxLength={2000}/></Form.Item>{customFields.map((field) => <Form.Item key={field.key} name={field.key} label={field.label} valuePropName={field.kind === 'checkbox' ? 'checked' : 'value'} rules={field.required ? [field.kind === 'checkbox' ? {validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Ushbu maydonni belgilang.'))} : {required:true}] : []}>{field.kind === 'select' ? <Select options={field.options.map((option)=>({value:option,label:option}))}/> : field.kind === 'checkbox' ? <Checkbox/> : field.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>)}</div>}
-        {step === 2 && <><Alert type="info" showIcon message="Hujjat matni avtomatik o‘qilishi mumkin" description="OCR faqat xodimga yordam beradi. Arizani tasdiqlashdan oldin hujjatlar alohida tekshiriladi; yuzni aniqlash bajarilmaydi."/><h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
+        {step === 2 && <><Alert type="info" showIcon message="Hujjatdan ayrim maydonlar to‘ldirilishi mumkin" description="Topilgan ma’lumotlarni tekshiring. Hujjat xodim tomonidan alohida ko‘rib chiqiladi."/><h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
       </>}
       <div className="public-form-actions">{step > 0 && !isClarification && <Button onClick={() => setStep((current)=>Math.max(0,current-1))}>Orqaga</Button>}{step < 2 && !isClarification ? <Button type="primary" onClick={() => void next()} loading={busy}>Saqlash va davom etish</Button> : <Button type="primary" htmlType="submit" loading={busy}>{isClarification ? 'Javobni yuborish' : 'Arizani yuborish'}</Button>}</div>
     </Form>

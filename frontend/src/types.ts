@@ -71,6 +71,7 @@ export type ApplicationData = {
 type ApplicationFileBase = {
   id: string; kind: 'PHOTO' | 'DOCUMENT'; document_type: string; original_name: string;
   content_type: string; size_bytes: number; scan_status: string; ocr_status: string; uploaded_at: string;
+  extracted_data?: Record<string, string>;
 };
 export type ApplicationFile = ApplicationFileBase & { ocr_text: string | null; ocr_truncated: boolean };
 export type PublicApplicationFile = ApplicationFileBase;

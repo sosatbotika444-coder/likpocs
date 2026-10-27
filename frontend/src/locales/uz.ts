@@ -33,8 +33,8 @@ export const uz = {
     dateOrder: 'Tugash sanasi boshlanish sanasidan keyin bo‘lishi kerak.',
   },
   login: {
-    eyebrow: 'YOTOQXONA BOSHQARUVI', title: 'Ishlaringiz maromida.',
-    subtitle: 'RS Best Hostel hisobingizga kiring.', email: 'Elektron pochta',
+    eyebrow: 'RS BEST HOSTEL · ISH BOSHQARUVI', title: 'Yotoqxona ishlarini bir joyda yuriting.',
+    subtitle: 'Yashovchilar, xonalar, qabul va hisob-kitoblar uchun kundalik ish maydoni.', email: 'Elektron pochta',
     password: 'Parol', submit: 'Tizimga kirish', security: 'Xavfsiz boshqaruv muhiti',
   },
   dashboard: {

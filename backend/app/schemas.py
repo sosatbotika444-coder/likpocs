@@ -529,6 +529,7 @@ class ApplicationFileOut(ORMModel):
     size_bytes: int
     scan_status: str
     ocr_status: str
+    extracted_data: dict[str, str] = Field(default_factory=dict)
     uploaded_at: datetime
 
 

@@ -58,8 +58,8 @@ function Login() {
     {contextHolder}
     <section className="login-art">
       <Link className="brand brand-light" to="/"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span><small>{uz.brand.subtitle}</small></span></Link>
-      <div className="login-art-copy"><div className="eyebrow">{uz.login.eyebrow}</div><h1>{uz.login.title}</h1><p>{uz.login.subtitle}</p><div className="login-illustration" aria-hidden="true"><div className="art-orbit"/><div className="art-building"><i/><i/><i/><i/></div><span className="art-spark spark-one">✳</span><span className="art-spark spark-two">✦</span></div></div>
-      <div className="login-art-footer"><span>✳</span> {uz.login.security}</div>
+      <div className="login-art-copy"><div className="eyebrow">{uz.login.eyebrow}</div><h1>{uz.login.title}</h1><p>{uz.login.subtitle}</p><div className="login-workflow"><div><span>01</span><strong>Qabul arizalarini ko‘rib chiqing</strong></div><div><span>02</span><strong>Xona va yashovchilarni boshqaring</strong></div><div><span>03</span><strong>To‘lovlarni qayd etib, hisobni kuzating</strong></div></div></div>
+      <div className="login-art-footer">{uz.login.security}</div>
     </section>
     <section className="login-form-side"><div className="login-form-wrap"><div className="mobile-brand"><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span></span></div><div className="eyebrow">Xush kelibsiz</div><h2>Hisobingizga kiring</h2><p className="muted">Ishni davom ettirish uchun ma’lumotlaringizni kiriting.</p>
       <form className="login-form" onSubmit={submit}><label htmlFor="email">{uz.login.email}</label><input id="email" name="email" type="email" autoComplete="username" required placeholder="operator@maskan.uz"/><label htmlFor="password">{uz.login.password}</label><input id="password" name="password" type="password" autoComplete="current-password" required minLength={1}/><Button type="primary" htmlType="submit" size="large" loading={busy} block>{uz.login.submit}<span aria-hidden="true"> →</span></Button></form>
@@ -108,7 +108,6 @@ function Shell() {
     <div className="side-section-label">ISH MAYDONI</div>
     <Menu theme="dark" mode="inline" selectedKeys={[location.pathname]} items={menuItems} onClick={({ key }) => { navigate(key); setDrawer(false); }} />
     <div className="sidebar-spacer"/>
-    <div className="help-card"><span className="help-spark">✳</span><strong>Yordam kerakmi?</strong><p>Administrator qo‘llanmasida tugmalar va jarayonlar tushuntirilgan.</p><Button type="link" title="Barcha bo‘limlar va tugmalar uchun yo‘riqnomani ochish" icon={<QuestionCircleOutlined />} onClick={() => { navigate('/guide'); setDrawer(false); }}>Qo‘llanmani ko‘rish</Button></div>
     <div className="side-account"><Avatar size={34} className="account-avatar">{initials}</Avatar><div className="account-copy"><strong>{user?.full_name}</strong><small>{user ? uz.role[user.role as Role] : ''}</small></div><Button type="text" icon={<LogoutOutlined />} aria-label="Tizimdan chiqish" onClick={logout}/></div>
   </>;
 
