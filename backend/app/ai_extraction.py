@@ -17,7 +17,7 @@ from PIL import Image
 
 from app.config import settings
 
-_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1"
 _MAX_PDF_PAGES = 5
 _MAX_PAGE_PIXELS = 6_000_000
 _MAX_TOTAL_PDF_PIXELS = 12_000_000
