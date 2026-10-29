@@ -30,19 +30,20 @@ const aiStatusLabels: Record<string, string> = {
   PROVIDER_UNAVAILABLE: 'AI xizmati vaqtincha ishlamayapti',
   PROVIDER_TIMEOUT: 'AI javobi vaqtida kelmadi',
   PROVIDER_REJECTED: 'AI xizmati so‘rovni qabul qilmadi',
+  PROVIDER_REQUEST_ERROR: 'OpenRouter so‘rovini tekshiring',
   INVALID_DOCUMENT: 'Hujjatni o‘qib bo‘lmadi',
   INVALID_RESPONSE: 'AI javobini o‘qib bo‘lmadi',
 };
 const aiErrorStatuses = new Set([
   'FAILED', 'UNSAFE_MODEL_ROUTE', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
   'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
-  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_DOCUMENT', 'INVALID_RESPONSE',
+  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_DOCUMENT', 'INVALID_RESPONSE', 'PROVIDER_REQUEST_ERROR',
   'OCR_NOT_CONFIGURED', 'OCR_FAILED', 'OCR_TIMEOUT',
 ]);
 const aiRetryableStatuses = new Set([
   'FAILED', 'NOT_CONFIGURED', 'CONSENT_REQUIRED', 'UNSAFE_MODEL_ROUTE', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
   'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
-  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_RESPONSE',
+  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_RESPONSE', 'PROVIDER_REQUEST_ERROR',
   'OCR_NOT_CONFIGURED', 'OCR_FAILED', 'OCR_TIMEOUT',
 ]);
 
@@ -56,6 +57,7 @@ function aiFailureMessage(status: string) {
   if (status === 'PROVIDER_BILLING_ERROR') return 'OpenRouter hisobi yoki foydalanish limiti so‘rovni to‘xtatdi. Hisob holati va limitni tekshirib, so‘ng qayta urinib ko‘ring.';
   if (status === 'PROVIDER_ACCESS_ERROR') return 'OpenRouter hisobida ushbu modeldan foydalanishga ruxsat yo‘q. API kalitini va hisob limitini tekshiring.';
   if (status === 'PROVIDER_MODEL_ERROR') return 'Tanlangan model yoki provider rasm tahlilini qo‘llamasligi mumkin. Model nomi, mavjudligi va vision imkoniyatini tekshiring.';
+  if (status === 'PROVIDER_REQUEST_ERROR') return 'OpenRouter so‘rovini bajarmadi. Railway Variables ichida model nomi va API kalitini tekshiring; Railway loglarida maxfiy ma’lumotsiz xato kodi yoziladi.';
   if (status === 'INVALID_DOCUMENT') return 'Hujjat o‘qilmadi. Sifatliroq rasm yuklang yoki maydonlarni qo‘lda kiriting.';
   if (status === 'PROVIDER_RATE_LIMITED') return 'AI so‘rovlari limiti vaqtincha tugadi. Birozdan keyin qayta urinib ko‘ring.';
   if (status === 'PROVIDER_UNAVAILABLE' || status === 'PROVIDER_TIMEOUT') return 'AI xizmati vaqtincha javob bermadi. Birozdan keyin qayta urinib ko‘ring.';

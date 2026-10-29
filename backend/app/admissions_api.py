@@ -1215,7 +1215,10 @@ def retry_public_file_extraction(
     if not row or row.kind != "DOCUMENT":
         raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
     processing_issue = document_processing_issue()
-    if processing_issue:
+    # A retry explicitly chooses one backend: with a fresh external-provider
+    # consent, do not silently fall back to local OCR if OpenRouter is not ready.
+    allow_external_ai = external_ai_consent and openrouter_processing_issue() is None
+    if processing_issue and not (external_ai_consent and local_ocr_available()):
         detail = (
             "Mahalliy OCR yoki maxfiylik talablariga mos AI xizmati sozlanmagan."
         )
@@ -1231,7 +1234,6 @@ def retry_public_file_extraction(
     if len(content) > settings.file_max_bytes:
         raise HTTPException(status_code=413, detail="Hujjat hajmi ruxsat etilgan chegaradan oshdi.")
 
-    allow_external_ai = external_ai_consent and openrouter_processing_issue() is None
     if not local_ocr_available() and not allow_external_ai:
         raise HTTPException(
             status_code=403,

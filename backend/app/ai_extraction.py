@@ -660,9 +660,12 @@ async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
             "messages": payload["messages"],
             "temperature": payload["temperature"],
             "max_tokens": payload["max_tokens"],
-            "response_format": payload["response_format"],
             "extra_headers": {"X-OpenRouter-Title": "RS Best Hostel"},
         }
+        # Free OpenRouter endpoints can reject response_format even when they
+        # accept image input. The prompt requests JSON and parsing is local.
+        if payload.get("response_format"):
+            request_options["response_format"] = payload["response_format"]
         if payload.get("provider"):
             request_options["extra_body"] = {"provider": payload["provider"]}
         completion = await client.chat.completions.create(**request_options)
@@ -769,8 +772,14 @@ async def extract_identity_document(
         return AIExtractionResult("INVALID_DOCUMENT", {})
 
     except Exception as exc:
+        # Keep a safe actionable category for unexpected provider/SDK errors.
+        # Exception text and response bodies may contain applicant data.
+        status_code = getattr(exc, "status_code", None)
         logger.error(
-            "Identity extraction failed: %s",
+            "Identity extraction failed: type=%s status_code=%s",
             type(exc).__name__,
+            status_code if isinstance(status_code, int) and 100 <= status_code <= 599 else "unknown",
         )
-        return AIExtractionResult("FAILED", {})
+        if isinstance(status_code, int):
+            return AIExtractionResult(_provider_failure_status(exc), {})
+        return AIExtractionResult("PROVIDER_UNAVAILABLE", {})

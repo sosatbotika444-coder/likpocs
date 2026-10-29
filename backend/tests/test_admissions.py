@@ -312,6 +312,38 @@ def test_free_vision_model_is_blocked_for_private_identity_documents(
     assert application is not None and application.ai_processing_consented_at is None
 
 
+def test_selected_openrouter_vision_model_is_allowed_and_directly_configured(monkeypatch):
+    from app.ai_extraction import openrouter_processing_issue
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-only-key")
+    monkeypatch.setattr(settings, "openrouter_enabled", True)
+    monkeypatch.setattr(settings, "openrouter_model", "dots-studio/dots-3-note-preview:free")
+
+    assert openrouter_processing_issue() is None
+
+
+def test_unexpected_openrouter_http_error_keeps_safe_provider_status(monkeypatch):
+    import asyncio
+
+    from app.ai_extraction import extract_identity_document
+
+    class ProviderError(Exception):
+        status_code = 400
+
+    async def reject_request(_payload):
+        raise ProviderError("private response body must not be returned")
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-only-key")
+    monkeypatch.setattr(settings, "openrouter_enabled", True)
+    monkeypatch.setattr(settings, "openrouter_model", "dots-studio/dots-3-note-preview:free")
+    monkeypatch.setattr("app.ai_extraction.local_ocr_available", lambda: False)
+    monkeypatch.setattr("app.ai_extraction._post_chat_completion", reject_request)
+
+    result = asyncio.run(extract_identity_document(_png_bytes(), "image/png", allow_external_ai=True))
+    assert result.status == "PROVIDER_REJECTED"
+    assert result.data == {}
+
+
 def test_openrouter_suggestions_require_consent_and_are_private(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     import json
 
