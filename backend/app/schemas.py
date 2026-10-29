@@ -434,6 +434,9 @@ class PublicCampaignOut(BaseModel):
     consent_version: str
     consent_text: str
     ai_processing_available: bool = False
+    ai_processing_issue: str | None = None
+    local_ocr_available: bool = False
+    external_ai_processing_available: bool = False
 
 
 class PublicSessionOut(BaseModel):

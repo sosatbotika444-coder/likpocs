@@ -86,9 +86,9 @@ export type ApplicationQueueItem = {
   id: string; reference: string; status: string; first_name_latin: string; last_name_latin: string;
   phone: string; campaign_id: string; dormitory_id: string; assigned_to: string | null; created_at: string;
 };
-export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string; ai_processing_available: boolean };
+export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string; ai_processing_available: boolean; ai_processing_issue: string | null; local_ocr_available: boolean; external_ai_processing_available: boolean };
 export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string };
-export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ai_configured: boolean; antivirus_configured: boolean };
+export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ai_configured: boolean; ai_configuration_issue: string | null; local_ocr_configured: boolean; external_ai_configured: boolean; antivirus_configured: boolean };
 export type AdmissionSummary = {
   total_applications: number; applications_this_month: number; pending_applications: number;
   approved_applications: number; approved_this_month: number; rejected_applications: number; linked_residents: number;

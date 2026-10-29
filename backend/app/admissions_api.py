@@ -18,7 +18,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.audit import audit, notify
-from app.ai_extraction import extract_identity_document, openrouter_configured
+from app.ai_extraction import (
+    document_processing_available,
+    document_processing_issue,
+    extract_identity_document,
+    local_ocr_available,
+    openrouter_document_processing_available,
+    openrouter_processing_issue,
+)
 from app.billing import create_initial_period
 from app.config import settings
 from app.db import get_db
@@ -306,7 +313,10 @@ def _public_campaign(campaign: AdmissionCampaign) -> PublicCampaignOut:
         document_types=campaign.document_types,
         consent_version=campaign.consent_version,
         consent_text=campaign.consent_text,
-        ai_processing_available=openrouter_configured(),
+        ai_processing_available=document_processing_available(),
+        ai_processing_issue=document_processing_issue(),
+        local_ocr_available=local_ocr_available(),
+        external_ai_processing_available=openrouter_document_processing_available(),
     )
 
 
@@ -868,7 +878,10 @@ def admission_settings(db: Session = Depends(get_db), user: User = Depends(get_c
         "default_period_days": default_period_days,
         "billing_change_allowed": settings.admins_can_adjust_billing,
         "uploads_enabled": storage_ready and (settings.environment != "production" or settings.file_retention_days is not None),
-        "ai_configured": openrouter_configured(),
+        "ai_configured": document_processing_available(),
+        "ai_configuration_issue": document_processing_issue(),
+        "local_ocr_configured": local_ocr_available(),
+        "external_ai_configured": openrouter_document_processing_available(),
         "antivirus_configured": False,
     }
 
@@ -1007,9 +1020,18 @@ def _public_file_out(row: ApplicationFile) -> ApplicationFileOut:
     return ApplicationFileOut.model_validate(row)
 
 
-async def _run_file_extraction(db: Session, row: ApplicationFile, content: bytes) -> None:
-    """Finish consented extraction after the upload response has been sent."""
-    result = await extract_identity_document(content, row.content_type)
+async def _run_file_extraction(
+    db: Session,
+    row: ApplicationFile,
+    content: bytes,
+    allow_external_ai: bool = False,
+) -> None:
+    """Run local OCR or the separately consented external model."""
+    result = await extract_identity_document(
+        content,
+        row.content_type,
+        allow_external_ai=allow_external_ai,
+    )
     try:
         # The conditional update makes deletion/replacement win even when it
         # races the provider response; a late result cannot restore erased PII.
@@ -1035,8 +1057,9 @@ def _schedule_file_extraction(
     db: Session,
     row: ApplicationFile,
     content: bytes,
+    allow_external_ai: bool = False,
 ) -> None:
-    background_tasks.add_task(_run_file_extraction, db, row, content)
+    background_tasks.add_task(_run_file_extraction, db, row, content, allow_external_ai)
 
 
 @public_router.post("/application/files", response_model=ApplicationFileOut, status_code=201)
@@ -1050,6 +1073,7 @@ async def upload_public_file(
     db: Session = Depends(get_db),
     csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
     ai_processing_consent: bool = Header(default=False, alias="X-AI-Processing-Consent"),
+    external_ai_consent: bool = Header(default=False, alias="X-External-AI-Consent"),
 ) -> ApplicationFileOut:
     _rate_limit(db, request, "upload", 40, 3600)
     application, _ = _student_write_session(request, db, csrf_token)
@@ -1072,11 +1096,23 @@ async def upload_public_file(
     ai_status = "NOT_CONFIGURED"
     extracted_data: dict[str, str] = {}
     should_extract = False
-    if kind == "DOCUMENT" and openrouter_configured():
-        if ai_processing_consent:
+    allow_external_ai = False
+    if kind == "DOCUMENT":
+        local_ocr_ready = local_ocr_available()
+        external_ai_requested = (
+            external_ai_consent
+            and openrouter_processing_issue() is None
+        )
+        processing_issue = document_processing_issue()
+        if processing_issue:
+            ai_status = processing_issue
+        elif not ai_processing_consent:
+            ai_status = "CONSENT_REQUIRED"
+        elif local_ocr_ready or external_ai_requested:
             application.ai_processing_consented_at = utcnow()
             ai_status = "PROCESSING"
             should_extract = True
+            allow_external_ai = external_ai_requested
         else:
             ai_status = "CONSENT_REQUIRED"
     object_key = f"admissions/{application.id}/{uuid4().hex}{suffix}"
@@ -1121,8 +1157,12 @@ async def upload_public_file(
             for previous in previous_files:
                 storage.delete(previous.object_key, db=db)
         audit(db, None, "APPLICATION_FILE_UPLOADED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
-        if kind == "DOCUMENT" and ai_processing_consent and openrouter_configured():
-            audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {"provider": "OpenRouter", "route": settings.openrouter_model})
+        if should_extract:
+            audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {
+                "provider": "OpenRouter" if allow_external_ai else "local_tesseract",
+                "external_ai": allow_external_ai,
+                "route": settings.openrouter_model if allow_external_ai else None,
+            })
         if previous_files:
             audit(db, None, "APPLICATION_FILE_REPLACED", "ApplicationFile", row.id, {"kind": kind, "document_type": row.document_type})
         db.commit()
@@ -1143,7 +1183,7 @@ async def upload_public_file(
                 # The replacement row is committed; the scheduled purge retries the old private object.
                 continue
     if should_extract:
-        _schedule_file_extraction(background_tasks, db, row, content)
+        _schedule_file_extraction(background_tasks, db, row, content, allow_external_ai)
     return _public_file_out(row)
 
 
@@ -1159,6 +1199,7 @@ def retry_public_file_extraction(
     db: Session = Depends(get_db),
     csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
     ai_processing_consent: bool = Header(default=False, alias="X-AI-Processing-Consent"),
+    external_ai_consent: bool = Header(default=False, alias="X-External-AI-Consent"),
 ) -> ApplicationFileOut:
     _rate_limit(db, request, "ai-extraction", 20, 3600)
     application, _ = _student_write_session(request, db, csrf_token)
@@ -1166,9 +1207,6 @@ def retry_public_file_extraction(
         raise HTTPException(status_code=409, detail="Yakunlangan ariza hujjatini qayta tahlil qilib bo‘lmaydi.")
     if not ai_processing_consent:
         raise HTTPException(status_code=403, detail="AI tahlilini boshlash uchun alohida rozilik bering.")
-    if not openrouter_configured():
-        raise HTTPException(status_code=503, detail="AI xizmati sozlanmagan.")
-
     row = db.scalar(select(ApplicationFile).where(
         ApplicationFile.id == file_id,
         ApplicationFile.application_id == application.id,
@@ -1176,6 +1214,12 @@ def retry_public_file_extraction(
     ))
     if not row or row.kind != "DOCUMENT":
         raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+    processing_issue = document_processing_issue()
+    if processing_issue:
+        detail = (
+            "Mahalliy OCR yoki maxfiylik talablariga mos AI xizmati sozlanmagan."
+        )
+        raise HTTPException(status_code=503, detail=detail)
     if row.ai_status == "PROCESSING":
         raise HTTPException(status_code=409, detail="Hujjat hozir tahlil qilinmoqda.")
     if row.ai_status in {"COMPLETED", "NO_FIELDS"}:
@@ -1187,13 +1231,23 @@ def retry_public_file_extraction(
     if len(content) > settings.file_max_bytes:
         raise HTTPException(status_code=413, detail="Hujjat hajmi ruxsat etilgan chegaradan oshdi.")
 
+    allow_external_ai = external_ai_consent and openrouter_processing_issue() is None
+    if not local_ocr_available() and not allow_external_ai:
+        raise HTTPException(
+            status_code=403,
+            detail="Mahalliy OCR mavjud emas. Tashqi AI tahliliga alohida rozilik bering.",
+        )
     application.ai_processing_consented_at = utcnow()
     row.ai_status = "PROCESSING"
     row.extracted_data = {}
-    audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {"provider": "OpenRouter", "route": settings.openrouter_model})
+    audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {
+        "provider": "OpenRouter" if allow_external_ai else "local_tesseract",
+        "external_ai": allow_external_ai,
+        "route": settings.openrouter_model if allow_external_ai else None,
+    })
     db.commit()
     db.refresh(row)
-    _schedule_file_extraction(background_tasks, db, row, content)
+    _schedule_file_extraction(background_tasks, db, row, content, allow_external_ai)
     return _public_file_out(row)
 
 

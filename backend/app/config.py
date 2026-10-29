@@ -44,14 +44,19 @@ class Settings(BaseSettings):
     file_max_image_pixels: int = Field(default=24_000_000, ge=1_000_000, le=100_000_000)
     public_app_url: str = "https://dormflows.netlify.app"
     openrouter_api_key: str = ""
-    openrouter_model: str = "openrouter/free"
+    openrouter_model: str = "dots-studio/dots-3-note-preview:free"
     openrouter_enabled: bool = True
-    openrouter_require_zdr: bool = True
+    tesseract_cmd: str = "tesseract"
     s3_endpoint_url: str = ""
     s3_bucket: str = ""
     s3_region: str = "us-east-1"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+
+    @field_validator("openrouter_model")
+    @classmethod
+    def normalize_openrouter_model(cls, value: str) -> str:
+        return value.strip() or "dots-studio/dots-3-note-preview:free"
 
     @field_validator("public_app_url")
     @classmethod

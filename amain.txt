@@ -1,5 +1,6 @@
-# OpenRouter server configuration
-# Set this in the repository .env file or the hosting environment. Never commit a real key.
+# Optional external AI fallback; local Tesseract OCR needs no API key.
+# Set only in the hosting environment when applicants separately consent to external processing. Never commit a real key.
 OPENROUTER_API_KEY=your-key-here
-OPENROUTER_MODEL=openrouter/free
-OPENROUTER_REQUIRE_ZDR=true
+# Local OCR runs first. External fallback requires a private paid route; never use a :free model for identity documents.
+OPENROUTER_MODEL=
+TESSERACT_CMD=tesseract

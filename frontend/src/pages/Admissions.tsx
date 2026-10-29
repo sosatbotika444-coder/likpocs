@@ -16,9 +16,12 @@ const statusLabels: Record<string, string> = {
 };
 const aiStatusLabels: Record<string, string> = {
   COMPLETED: 'Maydonlar topildi', NO_FIELDS: 'Ma\u2019lumot topilmadi',
-  NOT_CONFIGURED: 'AI sozlanmagan', CONSENT_REQUIRED: 'AI roziligi berilmagan',
-  PROCESSING: 'AI tahlil qilmoqda', FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
+  NOT_CONFIGURED: 'OCR sozlanmagan', OCR_NOT_CONFIGURED: 'Mahalliy OCR sozlanmagan',
+  OCR_FAILED: 'OCR xizmati ishlamadi', OCR_TIMEOUT: 'OCR vaqti tugadi',
+  CONSENT_REQUIRED: 'Avtomatik tahlilga rozilik berilmagan',
+  PROCESSING: 'Hujjat o\u2018qilmoqda', FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
   PROVIDER_CONFIG_ERROR: 'Eski yozuv: AI hisob sozlamasini tekshiring',
+  UNSAFE_MODEL_ROUTE: 'Bu bepul AI modeli yoqilmagan',
   PROVIDER_AUTH_ERROR: 'OpenRouter API kalitini tekshiring',
   PROVIDER_BILLING_ERROR: 'OpenRouter hisobi yoki limitini tekshiring',
   PROVIDER_ACCESS_ERROR: 'OpenRouter hisob ruxsati yoki maxfiylik tarifini tekshiring',
@@ -31,21 +34,27 @@ const aiStatusLabels: Record<string, string> = {
   INVALID_RESPONSE: 'AI javobini o‘qib bo‘lmadi',
 };
 const aiErrorStatuses = new Set([
-  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
+  'FAILED', 'UNSAFE_MODEL_ROUTE', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
   'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
   'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_DOCUMENT', 'INVALID_RESPONSE',
+  'OCR_NOT_CONFIGURED', 'OCR_FAILED', 'OCR_TIMEOUT',
 ]);
 const aiRetryableStatuses = new Set([
-  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
+  'FAILED', 'NOT_CONFIGURED', 'CONSENT_REQUIRED', 'UNSAFE_MODEL_ROUTE', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
   'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
   'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_RESPONSE',
+  'OCR_NOT_CONFIGURED', 'OCR_FAILED', 'OCR_TIMEOUT',
 ]);
 
 function aiFailureMessage(status: string) {
+  if (status === 'OCR_NOT_CONFIGURED') return 'Serverda mahalliy OCR sozlanmagan. Administrator Tesseract va Uzbek lotin/kirill tillarini o‘rnatsin.';
+  if (status === 'OCR_FAILED') return 'Hujjatni serverda o‘qib bo‘lmadi. Aniqroq surat yuklang yoki ma’lumotlarni qo‘lda kiriting.';
+  if (status === 'OCR_TIMEOUT') return 'Hujjatni o‘qish uzoq davom etdi. Sahifalari kamroq yoki tiniqroq fayl bilan qayta urinib ko‘ring.';
+  if (status === 'UNSAFE_MODEL_ROUTE') return 'Bu bepul model yoqilmagan. Administrator Dots3-Note Preview modelini sozlashi yoki maydonlarni qo‘lda kiriting.';
   if (status === 'PROVIDER_CONFIG_ERROR') return 'Oldingi tahlilda hisob yoki model sozlamasi aniqlanmagan. Administrator OpenRouter kaliti, hisob holati va maxfiylik talablariga mos modelni tekshirsin.';
   if (status === 'PROVIDER_AUTH_ERROR') return 'OpenRouter API kaliti noto‘g‘ri yoki faol emas. Administrator kalitni tekshirib, so‘ng qayta urinib ko‘rsin.';
   if (status === 'PROVIDER_BILLING_ERROR') return 'OpenRouter hisobi yoki foydalanish limiti so‘rovni to‘xtatdi. Hisob holati va limitni tekshirib, so‘ng qayta urinib ko‘ring.';
-  if (status === 'PROVIDER_ACCESS_ERROR') return 'OpenRouter hisobida modelga yoki maxfiylik siyosatiga ruxsat yo‘q. Hisob tarifi va ZDR/data_collection cheklovlariga mos provider mavjudligini tekshiring.';
+  if (status === 'PROVIDER_ACCESS_ERROR') return 'OpenRouter hisobida ushbu modeldan foydalanishga ruxsat yo‘q. API kalitini va hisob limitini tekshiring.';
   if (status === 'PROVIDER_MODEL_ERROR') return 'Tanlangan model yoki provider rasm tahlilini qo‘llamasligi mumkin. Model nomi, mavjudligi va vision imkoniyatini tekshiring.';
   if (status === 'INVALID_DOCUMENT') return 'Hujjat o‘qilmadi. Sifatliroq rasm yuklang yoki maydonlarni qo‘lda kiriting.';
   if (status === 'PROVIDER_RATE_LIMITED') return 'AI so‘rovlari limiti vaqtincha tugadi. Birozdan keyin qayta urinib ko‘ring.';
@@ -92,6 +101,7 @@ function PublicIntake() {
   const processingPolls = useRef<Set<string>>(new Set());
   const [autofilledFields, setAutofilledFields] = useState<string[]>([]);
   const [aiProcessingConsent, setAIProcessingConsent] = useState(false);
+  const [externalAIConsent, setExternalAIConsent] = useState(false);
   const exchangeStarted = useRef(false);
   const isClarification = application?.status === 'NEEDS_INFO';
 
@@ -121,6 +131,7 @@ function PublicIntake() {
     setApplication(data);
     setCampaign(campaignData);
     setAIProcessingConsent(false);
+    setExternalAIConsent(false);
     setCsrf(csrfToken);
     const values: Record<string, unknown> = { ...data };
     for (const field of publicDateFields) values[field] = data[field as keyof PublicApplication] ? dayjs(data[field as keyof PublicApplication] as string) : null;
@@ -220,16 +231,16 @@ function PublicIntake() {
 
   const retryAI = async (file: PublicApplicationFile) => {
     if (!aiProcessingConsent) {
-      notice.warning({ message: 'Avval AI tahliliga rozilik bering.' });
+      notice.warning({ message: campaign?.ai_processing_issue === 'UNSAFE_MODEL_ROUTE' ? aiFailureMessage('UNSAFE_MODEL_ROUTE') : "Avval hujjatni avtomatik o'qishga rozilik bering." });
       return;
     }
     setRetryingFileIds((current) => [...current, file.id]);
     try {
       const result = await api.post<PublicApplicationFile>(`/public/application/files/${file.id}/extract`, null, {
-        headers: { 'X-CSRF-Token': csrf, 'X-AI-Processing-Consent': 'true' },
+        headers: { 'X-CSRF-Token': csrf, 'X-AI-Processing-Consent': 'true', ...(externalAIConsent ? { 'X-External-AI-Consent': 'true' } : {}) },
       });
       setFiles((current) => current.map((item) => item.id === file.id ? result.data : item));
-      notice.info({ message: 'Hujjat AI tahliliga yuborildi.' });
+      notice.info({ message: 'Hujjatni tahlil qilish qayta boshlandi.' });
     } catch (error) {
       notice.error({ message: 'AI tahlilini qayta boshlash imkoni bo‘lmadi', description: errorMessage(error) });
     } finally {
@@ -274,7 +285,7 @@ function PublicIntake() {
     let uploaded = false;
     try {
       const result = await api.post<PublicApplicationFile>('/public/application/files', body, {
-        headers: { 'X-CSRF-Token': csrf, ...(kind === 'DOCUMENT' && aiProcessingConsent ? { 'X-AI-Processing-Consent': 'true' } : {}) },
+        headers: { 'X-CSRF-Token': csrf, ...(kind === 'DOCUMENT' && aiProcessingConsent ? { 'X-AI-Processing-Consent': 'true' } : {}), ...(kind === 'DOCUMENT' && externalAIConsent ? { 'X-External-AI-Consent': 'true' } : {}) },
         onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.min(95, Math.round((event.loaded * 95) / event.total)) : 45 })),
       });
       uploaded = true;
@@ -284,7 +295,7 @@ function PublicIntake() {
       const message = filled.length
         ? `Hujjat yuklandi. ${filled.length} ta maydon to’ldirildi.`
         : result.data.ai_status === 'CONSENT_REQUIRED'
-          ? 'Hujjat saqlandi. Avtomatik to’ldirish uchun AI roziligini belgilang.'
+          ? "Hujjat saqlandi. Avtomatik o'qish uchun rozilikni belgilang."
           : aiErrorStatuses.has(savedFile.ai_status)
             ? `Hujjat saqlandi. ${aiFailureMessage(savedFile.ai_status)}`
             : savedFile.ai_status === 'NO_FIELDS'
@@ -324,11 +335,25 @@ function PublicIntake() {
 
   const fileButtons = (requestedOnly: boolean, includePhoto = true, documentTypes = campaign.document_types) => <div className="public-upload-list">
     {includePhoto && (!requestedOnly || isFileRequested('photo')) && <section className="public-upload-item"><div><strong>Yashovchi surati</strong><small>Kamera bilan oling yoki rasm yuklang.</small></div><label className="upload-control"><input type="file" accept="image/jpeg,image/png,image/webp" capture="user" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'PHOTO'); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'PHOTO') ? 'Suratni almashtirish' : 'Surat tanlash'}</span></label>{progress.PHOTO !== undefined && <Progress percent={progress.PHOTO} size="small"/>}{files.filter((item) => item.kind === 'PHOTO').map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>}
-    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <div className="public-file-result" key={item.id}><Tag color="green">{item.original_name}</Tag><Tag color={aiErrorStatuses.has(item.ai_status) ? 'red' : item.ai_status === 'COMPLETED' ? 'green' : 'default'}>{aiStatusLabels[item.ai_status] || item.ai_status}</Tag>{item.ai_status === 'PROCESSING' && <small>Hujjat tekshirilmoqda. Maydonlar tayyor bo‘lganda avtomatik kiritiladi.</small>}{aiRetryableStatuses.has(item.ai_status) && <Button size="small" loading={retryingFileIds.includes(item.id)} onClick={() => void retryAI(item)}>AI tahlilini qayta urinish</Button>}</div>)}</section>)}
+    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <div className="public-file-result" key={item.id}><Tag color="green">{item.original_name}</Tag><Tag color={aiErrorStatuses.has(item.ai_status) ? 'red' : item.ai_status === 'COMPLETED' ? 'green' : 'default'}>{aiStatusLabels[item.ai_status] || item.ai_status}</Tag>{item.ai_status === 'PROCESSING' && <small>Hujjat tekshirilmoqda. Maydonlar tayyor bo‘lganda avtomatik kiritiladi.</small>}{aiRetryableStatuses.has(item.ai_status) && <Button size="small" loading={retryingFileIds.includes(item.id)} onClick={() => void retryAI(item)}>OCRni qayta urinish</Button>}</div>)}</section>)}
   </div>;
 
 
-  const aiConsentControl = campaign.ai_processing_available ? <div className="ai-consent-box"><Alert type="warning" showIcon message="Avtomatik to’ldirish OpenRouter orqali ishlaydi" description="Rozilik bersangiz, hujjat sahifalari OpenRouter orqali tashqi AI provayderiga uzatiladi. AI topgan qiymatlar ariza maydonlariga qo’yiladi. Roziliksiz ham faylni yuklab, ma’lumotlarni qo’lda kiritishingiz mumkin."/><Checkbox checked={aiProcessingConsent} onChange={(event)=>setAIProcessingConsent(event.target.checked)}>Hujjatimni OpenRouter orqali tashqi AI provayderida tahlil qilishga roziman.</Checkbox></div> : null;
+  const aiConsentControl = campaign.ai_processing_available
+    ? <div className="ai-consent-box">
+        <Alert type="info" showIcon message={externalAIConsent ? "OpenRouter AI avtomatik to‘ldirishi" : campaign.local_ocr_available ? "Bepul mahalliy OCR" : "Tashqi AI tahlili"} description={campaign.local_ocr_available
+          ? externalAIConsent
+            ? "Alohida rozilik berdingiz: hujjat Dots3-Note Preview AI modeliga yuboriladi, javobi maydonlarga taklif sifatida qo‘yiladi. Belgilamasangiz, hujjat faqat serverdagi Tesseract OCR bilan o‘qiladi. Har bir qiymatni tekshiring."
+            : "Hujjat serverning o‘zida Tesseract OCR bilan o‘qiladi. Bepul va tashqi xizmatga yuborilmaydi. Topilgan qiymatlarni asl hujjat bilan tekshiring."
+          : "Hujjat OpenRouter orqali Dots3-Note Preview AI modeliga yuboriladi va topilgan qiymatlar tekshirishingiz uchun maydonlarga qo‘yiladi."}/>
+        {campaign.local_ocr_available
+          ? <Checkbox checked={aiProcessingConsent} onChange={(event)=>{setAIProcessingConsent(event.target.checked);if(!event.target.checked)setExternalAIConsent(false);}}>Hujjatimni server ichida avtomatik o'qishga roziman.</Checkbox>
+          : <Checkbox checked={externalAIConsent} onChange={(event)=>{setExternalAIConsent(event.target.checked);setAIProcessingConsent(event.target.checked);}}>Hujjatimni OpenRouter orqali tashqi AI provayderiga yuborishga roziman.</Checkbox>}
+        {campaign.local_ocr_available && campaign.external_ai_processing_available && <Checkbox checked={externalAIConsent} onChange={(event)=>{setExternalAIConsent(event.target.checked);if(event.target.checked)setAIProcessingConsent(true);}}>Hujjatimni OpenRouter orqali Dots3-Note Preview AI modeliga yuborib, maydonlarni avtomatik to‘ldirishga roziman.</Checkbox>}
+      </div>
+    : campaign.ai_processing_issue === 'UNSAFE_MODEL_ROUTE'
+      ? <Alert type="warning" showIcon message="Avtomatik to'ldirish hozircha o'chiq" description="Administrator yoqilgan Dots3-Note Preview modelini sozlashi kerak. Hujjatni yuklashingiz mumkin, maydonlarni qo‘lda kiriting."/>
+      : <Alert type="warning" showIcon message="Mahalliy OCR sozlanmagan" description="Administrator serverga Tesseract OCR va uzb, uzb_cyrl, eng, rus til modellarini o'rnatsin. Hujjatni yuklab, maydonlarni qo'lda ham to'ldirishingiz mumkin."/>;
   const renderRequestedInputs = () => <div className="form-grid">{application.requested_fields.filter((field) => !field.startsWith('document:') && field !== 'photo').map((field) => {
     const custom = customFields.find((item) => item.key === field);
     if (custom) return <Form.Item key={field} name={field} label={custom.label} rules={[{required:custom.required}]}>{custom.kind === 'select' ? <Select options={custom.options.map((option)=>({value:option,label:option}))}/> : custom.kind === 'checkbox' ? <Checkbox/> : custom.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>;
@@ -543,7 +568,7 @@ function StaffAdmissions() {
 
   return <div className="page-stack">{holder}
     <PageHeading eyebrow="TALABALAR BILAN ISHLASH" title="Qabul va arizalar" subtitle="Takliflar, arizalar va joylashtirishni bitta navbatda boshqaring." action="Taklif yaratish" onAction={()=>{inviteForm.setFieldsValue({max_submissions:25});setInviteOpen(true);}}/>
-    {settings && <div className="admission-status-strip"><span>Fayl ombori: <strong>{settings.storage_configured?'tayyor':'sozlanmagan'}</strong></span><span>Saqlash muddati: <strong>{settings.retention_days ? `${settings.retention_days} kun` : 'belgilanmagan'}</strong></span><span>AI: <strong>{settings.ai_configured?'sozlangan':'sozlanmagan'}</strong></span><span>Antivirus: <strong>{settings.antivirus_configured?'tayyor':'sozlanmagan'}</strong></span></div>}
+    {settings && <div className="admission-status-strip"><span>Fayl ombori: <strong>{settings.storage_configured?'tayyor':'sozlanmagan'}</strong></span><span>Saqlash muddati: <strong>{settings.retention_days ? `${settings.retention_days} kun` : 'belgilanmagan'}</strong></span><span>Mahalliy OCR: <strong>{settings.local_ocr_configured?'tayyor':'sozlanmagan'}</strong></span><span>Tashqi AI: <strong>{settings.external_ai_configured?'rozilik bilan mavjud':'ixtiyoriy/sozlanmagan'}</strong></span><span>Antivirus: <strong>{settings.antivirus_configured?'tayyor':'sozlanmagan'}</strong></span></div>}
     {!settings?.uploads_enabled && <Alert type="warning" showIcon message="Fayl yuklash sozlamalarini tekshiring" description="Yuklash uchun xususiy fayl ombori va saqlash muddati sozlangan bo‘lishi kerak."/>}
     <Tabs items={[
       {key:'statistics',label:'Statistika',children:statisticsPanel},

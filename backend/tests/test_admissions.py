@@ -249,12 +249,76 @@ def test_openrouter_failure_status_mapping_is_actionable_and_safe():
     assert _provider_failure_status(SimpleNamespace()) == "FAILED"
 
 
+def test_free_vision_model_is_blocked_for_private_identity_documents(
+    client,
+    database,
+    operator_token,
+    admin_token,
+    tmp_path,
+    monkeypatch,
+):
+    import asyncio
+
+    from app.ai_extraction import (
+        extract_identity_document,
+        openrouter_document_processing_available,
+        openrouter_processing_issue,
+    )
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-only-key")
+    monkeypatch.setattr(settings, "openrouter_enabled", True)
+    monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+    monkeypatch.setattr(
+        settings,
+        "openrouter_model",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    )
+
+    assert openrouter_processing_issue() == "UNSAFE_MODEL_ROUTE"
+    assert openrouter_document_processing_available() is False
+    result = asyncio.run(extract_identity_document(_png_bytes(), "image/png"))
+    assert result.status == "UNSAFE_MODEL_ROUTE"
+    assert result.data == {}
+
+    _, _, _, _, public_session = _workflow(
+        client,
+        operator_token,
+        admin_token,
+        document_types=["ID"],
+    )
+    assert public_session["campaign"]["ai_processing_available"] is False
+    assert public_session["campaign"]["ai_processing_issue"] == "UNSAFE_MODEL_ROUTE"
+    _fill_application(client, public_session)
+    calls = []
+
+    async def unexpected_openrouter_call(payload):
+        calls.append(payload)
+        raise AssertionError("free model must not receive private documents")
+
+    monkeypatch.setattr("app.ai_extraction._post_chat_completion", unexpected_openrouter_call)
+    upload = client.post(
+        "/api/public/application/files",
+        headers={
+            "X-CSRF-Token": public_session["csrf_token"],
+            "X-AI-Processing-Consent": "true",
+        },
+        data={"kind": "DOCUMENT", "document_type": "ID"},
+        files={"upload": ("identity.png", _png_bytes(), "image/png")},
+    )
+    assert upload.status_code == 201, upload.text
+    assert upload.json()["ai_status"] == "UNSAFE_MODEL_ROUTE"
+    assert calls == []
+    application = database.scalar(select(StudentApplication))
+    assert application is not None and application.ai_processing_consented_at is None
+
+
 def test_openrouter_suggestions_require_consent_and_are_private(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     import json
 
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
     monkeypatch.setattr(settings, "openrouter_api_key", "test-only-key")
     monkeypatch.setattr(settings, "openrouter_enabled", True)
+    monkeypatch.setattr(settings, "openrouter_model", "test/private-vision-model")
     calls = []
 
     async def fake_openrouter(payload):
@@ -289,7 +353,7 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
 
     upload = client.post(
         "/api/public/application/files",
-        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true"},
+        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true", "X-External-AI-Consent": "true"},
         data={"kind": "DOCUMENT", "document_type": "ID"},
         files={"upload": ("identity.png", _png_bytes(), "image/png")},
     )
@@ -308,7 +372,7 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
 
     retried = client.post(
         f"/api/public/application/files/{uploaded_file_id}/extract",
-        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true"},
+        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true", "X-External-AI-Consent": "true"},
     )
     assert retried.status_code == 202, retried.text
     completed_file = next(item for item in client.get("/api/public/application/files").json() if item["id"] == uploaded_file_id)
@@ -319,10 +383,9 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
         "middle_name_latin": "ANVAR QIZI",
         "birth_date": "2005-04-11",
     }
-    assert calls[0]["model"] == "openrouter/free"
-    assert calls[0]["provider"]["data_collection"] == "deny"
-    assert calls[0]["provider"]["zdr"] is True
-    assert "allow_fallbacks" not in calls[0]["provider"]
+    assert calls[0]["model"] == "test/private-vision-model"
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert "provider" not in calls[0]
     assert "ocr_text" not in completed_file
 
     public_files = client.get("/api/public/application/files")

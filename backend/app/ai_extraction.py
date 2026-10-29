@@ -1,17 +1,22 @@
 
-"""Private, consent-gated identity-field extraction through OpenRouter."""
+"""Consent-gated local OCR and OpenRouter document-field suggestions."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import io
 import json
 import logging
 import math
 import re
+import shutil
+import subprocess
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 import pymupdf
@@ -24,6 +29,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_FREE_VISION_MODEL = "dots-studio/dots-3-note-preview:free"
 
 _MAX_FILE_BYTES = 15 * 1024 * 1024
 _MAX_PDF_PAGES = 5
@@ -32,6 +38,9 @@ _MAX_TOTAL_PDF_PIXELS = 12_000_000
 _MAX_IMAGE_DIMENSION = 2400
 _MAX_FIELD_LENGTH = 120
 _TIMEOUT_SECONDS = 45.0
+_OCR_TIMEOUT_SECONDS = 30.0
+_OCR_LANGUAGES = "uzb+uzb_cyrl+eng+rus"
+_OCR_MIN_CONFIDENCE = 75.0
 
 _ALLOWED_FIELDS = {
     "first_name_latin",
@@ -86,6 +95,99 @@ class AIExtractionResult:
     data: dict[str, str]
 
 
+@dataclass(frozen=True)
+class _OCRLine:
+    text: str
+    confidence: float
+
+
+_FIELD_LABELS: dict[str, tuple[str, ...]] = {
+    "first_name": (
+        "given names", "given name", "first name", "ismi", "ism",
+        "имя", "исми", "исм",
+    ),
+    "last_name": (
+        "surname", "last name", "family name", "familiyasi", "familiya",
+        "фамилия",
+    ),
+    "middle_name": (
+        "father's name", "father name", "middle name", "patronymic",
+        "otasining ismi", "отчество", "отасининг исми",
+    ),
+    "birth_date": (
+        "date of birth", "birth date", "date of birth", "tug'ilgan sanasi",
+        "tugilgan sanasi", "tug'ilgan sana", "tugilgan sana", "дата рождения",
+        "туғилган санаси", "dob",
+    ),
+    "nationality": (
+        "nationality", "citizenship", "fuqaroligi", "millati", "гражданство",
+        "фуқаролиги",
+    ),
+    "gender": ("gender", "sex", "jinsi", "пол", "жинси"),
+    "address": ("address", "manzil", "адрес", "манзил"),
+    "institution": (
+        "educational institution", "institution", "university", "college",
+        "ta'lim muassasasi", "talim muassasasi", "o'quv yurti", "учебное заведение",
+    ),
+    "faculty": ("faculty", "fakultet", "факультет"),
+    "course": ("course", "kurs", "курс"),
+    "study_group": ("study group", "group", "guruh", "группа", "гуруҳ"),
+    "study_start": (
+        "study start", "start of study", "o'qish boshlanishi", "o'qishga kirgan sana",
+        "начало обучения",
+    ),
+    "study_end": (
+        "study end", "end of study", "o'qish tugashi", "bitiruv sanasi",
+        "окончание обучения",
+    ),
+}
+
+_LABEL_PATTERNS = tuple(
+    (key, re.compile(r"(?<![\w])" + re.escape(label) + r"(?![\w])", re.IGNORECASE))
+    for key, labels in _FIELD_LABELS.items()
+    for label in sorted(labels, key=len, reverse=True)
+)
+
+
+def _tesseract_path() -> str | None:
+    command = getattr(settings, "tesseract_cmd", "tesseract") or "tesseract"
+    return shutil.which(command)
+
+
+@lru_cache(maxsize=1)
+def local_ocr_available() -> bool:
+    """Check whether the local OCR binary and Uzbek/Latin/Cyrillic models exist."""
+    executable = _tesseract_path()
+    if not executable:
+        return False
+    try:
+        result = subprocess.run(
+            [executable, "--list-langs"],
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+    languages = {line.strip() for line in output.splitlines()[1:] if line.strip()}
+    return {"uzb", "uzb_cyrl", "eng", "rus"} <= languages
+
+
+def document_processing_issue() -> str | None:
+    """Report a safe reason when neither local OCR nor private external AI is ready."""
+    if local_ocr_available() or openrouter_processing_issue() is None:
+        return None
+    provider_issue = openrouter_processing_issue()
+    return provider_issue or "OCR_NOT_CONFIGURED"
+
+
+def document_processing_available() -> bool:
+    return document_processing_issue() is None
+
+
 def openrouter_configured() -> bool:
     api_key = getattr(settings, "openrouter_api_key", "") or ""
     model = getattr(settings, "openrouter_model", "") or ""
@@ -97,6 +199,25 @@ def openrouter_configured() -> bool:
         and isinstance(model, str)
         and model.strip()
     )
+
+
+def openrouter_processing_issue() -> str | None:
+    """Return why private document extraction cannot run, if it cannot."""
+    if not openrouter_configured():
+        return "NOT_CONFIGURED"
+
+    model = settings.openrouter_model.strip().lower()
+    if model == "openrouter/free" or (
+        model.endswith(":free") and model != _OPENROUTER_FREE_VISION_MODEL
+    ):
+        # Only the specifically selected image-capable Dots endpoint is enabled.
+        return "UNSAFE_MODEL_ROUTE"
+
+    return None
+
+
+def openrouter_document_processing_available() -> bool:
+    return openrouter_processing_issue() is None
 
 
 def _normalize_content_type(content_type: str) -> str:
@@ -218,9 +339,196 @@ def _image_payload(
     return "image/jpeg", [_image_to_jpeg(content)]
 
 
+def _prepare_ocr_image(content: bytes) -> bytes:
+    """Normalize a page for local OCR without retaining or exporting its pixels."""
+    with Image.open(io.BytesIO(content)) as original:
+        image = ImageOps.exif_transpose(original).convert("L")
+        image = ImageOps.autocontrast(image, cutoff=1)
+        longest = max(image.size)
+        if longest < 1800:
+            scale = min(1.5, 1800 / longest)
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        image.thumbnail((3000, 3000), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        image.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+
+
+def _tesseract_lines(image: bytes, page_segmentation: int = 6) -> list[_OCRLine]:
+    executable = _tesseract_path()
+    if not executable:
+        raise RuntimeError("Local OCR executable is unavailable")
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "stdin",
+                "stdout",
+                "-l",
+                _OCR_LANGUAGES,
+                "--psm",
+                str(page_segmentation),
+                "tsv",
+            ],
+            input=image,
+            capture_output=True,
+            timeout=_OCR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Local OCR timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError("Local OCR process failed")
+
+    reader = csv.DictReader(
+        io.StringIO((result.stdout + result.stderr).decode("utf-8", errors="replace")),
+        delimiter="\t",
+    )
+    grouped: dict[tuple[str, str, str, str], list[tuple[str, float]]] = {}
+    for row in reader:
+        token = (row.get("text") or "").strip()
+        if not token:
+            continue
+        try:
+            confidence = float(row.get("conf", "-1"))
+        except (TypeError, ValueError):
+            confidence = -1
+        key = tuple(row.get(name, "") for name in ("page_num", "block_num", "par_num", "line_num"))
+        grouped.setdefault(key, []).append((token, confidence))
+
+    lines = []
+    for words in grouped.values():
+        confidences = [confidence for _, confidence in words if confidence >= 0]
+        if not confidences:
+            continue
+        lines.append(_OCRLine(" ".join(word for word, _ in words), sum(confidences) / len(confidences)))
+    return lines
+
+
+def _label_matches(text: str) -> list[tuple[int, int, str]]:
+    normalized = unicodedata.normalize("NFKC", text).casefold().replace(chr(0x2019), "'").replace(chr(0x2018), "'").replace("`", "'")
+    found: list[tuple[int, int, str]] = []
+    for key, pattern in _LABEL_PATTERNS:
+        for match in pattern.finditer(normalized):
+            found.append((match.start(), match.end(), key))
+    found.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+
+    # Keep only the most specific non-overlapping label at each position.
+    selected: list[tuple[int, int, str]] = []
+    for match in found:
+        if selected and match[0] < selected[-1][1]:
+            continue
+        selected.append(match)
+    return selected
+
+
+def _clean_ocr_value(key: str, value: str) -> str | None:
+    item = re.sub(r"^[\s:;=|/\\#.,-]+|[\s:;=|/\\#.,-]+$", "", value).strip()
+    item = re.sub(r"\s+", " ", item)
+    if not item or len(item) > _MAX_FIELD_LENGTH:
+        return None
+    if key in _DATE_FIELDS or key in {"birth_date", "study_start", "study_end"}:
+        date_match = re.search(r"\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{4})\b", item)
+        return _normalize_date(date_match.group(0)) if date_match else None
+    if key == "gender":
+        normalized_gender = item.casefold()
+        if re.search(r"\b(?:female|f|ayol|женский)\b", normalized_gender):
+            return "FEMALE"
+        if re.search(r"\b(?:male|m|erkak|мужской)\b", normalized_gender):
+            return "MALE"
+        return None
+    if key in {"first_name", "last_name", "middle_name", "nationality", "institution", "faculty"}:
+        if any(char.isdigit() for char in item):
+            return None
+        if not any(char.isalpha() for char in item):
+            return None
+    if any(ord(char) < 32 for char in item):
+        return None
+    return item
+
+
+def _scripted_name_field(key: str, value: str) -> str:
+    base = {"first_name": "first_name", "last_name": "last_name", "middle_name": "middle_name"}[key]
+    cyrillic = sum("\u0400" <= char <= "\u052f" for char in value)
+    latin = sum("A" <= char <= "Z" or "a" <= char <= "z" for char in value)
+    return f"{base}_cyrillic" if cyrillic > latin else f"{base}_latin"
+
+
+def _fields_from_ocr_lines(lines: list[_OCRLine]) -> dict[str, str]:
+    candidates: dict[str, tuple[float, str]] = {}
+    for index, line in enumerate(lines):
+        matches = _label_matches(line.text)
+        if not matches:
+            continue
+        for match_index, (start, end, key) in enumerate(matches):
+            next_start = matches[match_index + 1][0] if match_index + 1 < len(matches) else len(line.text)
+            # Label spans are from normalized text, whose apostrophes and length
+            # are unchanged except for compatibility characters; locate the raw
+            # tail using the matched label's normalized length.
+            value = line.text[end:min(next_start, len(line.text))]
+            for label_start, label_end, _ in reversed(_label_matches(value)):
+                value = value[:label_start] + " " + value[label_end:]
+            value = re.sub(r"^[\s:;=|/\\#.,-]+", "", value)
+            confidence = line.confidence
+
+            if not value.strip():
+                for following in lines[index + 1:index + 3]:
+                    if _label_matches(following.text):
+                        break
+                    if following.confidence >= _OCR_MIN_CONFIDENCE:
+                        value = following.text
+                        confidence = following.confidence
+                        break
+
+            if confidence < _OCR_MIN_CONFIDENCE:
+                continue
+            cleaned = _clean_ocr_value(key, value)
+            if not cleaned:
+                continue
+            output_key = _scripted_name_field(key, cleaned) if key in {"first_name", "last_name", "middle_name"} else key
+            previous = candidates.get(output_key)
+            if previous is None or confidence > previous[0]:
+                candidates[output_key] = (confidence, cleaned)
+
+    parsed = _parse_fields(json.dumps({key: value for key, (_, value) in candidates.items()}))
+    return parsed
+
+
+def _extract_local_ocr(content: bytes, content_type: str) -> AIExtractionResult:
+    if not local_ocr_available():
+        return AIExtractionResult("OCR_NOT_CONFIGURED", {})
+    try:
+        _, pages = _image_payload(content, content_type)
+        all_lines: list[_OCRLine] = []
+        for page in pages:
+            prepared = _prepare_ocr_image(page)
+            all_lines.extend(_tesseract_lines(prepared, page_segmentation=6))
+        fields = _fields_from_ocr_lines(all_lines)
+        if len(fields) < 5:
+            # Sparse layouts and ID cards often benefit from Tesseract's
+            # automatic page segmentation; only pay this cost for incomplete OCR.
+            alternate_lines: list[_OCRLine] = []
+            for page in pages:
+                alternate_lines.extend(_tesseract_lines(_prepare_ocr_image(page), page_segmentation=11))
+            alternate_fields = _fields_from_ocr_lines(alternate_lines)
+            fields = {**fields, **{key: value for key, value in alternate_fields.items() if key not in fields}}
+        return AIExtractionResult("COMPLETED" if fields else "NO_FIELDS", fields)
+    except TimeoutError:
+        logger.warning("Local OCR timed out")
+        return AIExtractionResult("OCR_TIMEOUT", {})
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Local OCR failed: %s", type(exc).__name__)
+        return AIExtractionResult("OCR_FAILED", {})
+
+
 def _normalize_date(value: str) -> str | None:
     formats = (
         (r"\d{4}-\d{1,2}-\d{1,2}", "%Y-%m-%d"),
+        (r"\d{4}/\d{1,2}/\d{1,2}", "%Y/%m/%d"),
+        (r"\d{4}\.\d{1,2}\.\d{1,2}", "%Y.%m.%d"),
         (r"\d{1,2}[./]\d{1,2}[./]\d{4}", None),
         (r"\d{1,2}-\d{1,2}-\d{4}", "%d-%m-%Y"),
     )
@@ -347,26 +655,36 @@ async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
         # The browser no longer waits on this request; avoid hidden long retries.
         max_retries=0,
     ) as client:
-        completion = await client.chat.completions.create(
-            model=payload["model"],
-            messages=payload["messages"],
-            temperature=payload["temperature"],
-            max_tokens=payload["max_tokens"],
-            response_format=payload["response_format"],
-            extra_headers={"X-OpenRouter-Title": "RS Best Hostel"},
-            extra_body={"provider": payload["provider"]},
-        )
+        request_options: dict[str, Any] = {
+            "model": payload["model"],
+            "messages": payload["messages"],
+            "temperature": payload["temperature"],
+            "max_tokens": payload["max_tokens"],
+            "response_format": payload["response_format"],
+            "extra_headers": {"X-OpenRouter-Title": "RS Best Hostel"},
+        }
+        if payload.get("provider"):
+            request_options["extra_body"] = {"provider": payload["provider"]}
+        completion = await client.chat.completions.create(**request_options)
     return completion.model_dump()
 
 
 async def extract_identity_document(
     content: bytes,
     content_type: str,
+    allow_external_ai: bool = False,
 ) -> AIExtractionResult:
-    """Extract validated identity or education document fields."""
+    """Use local OCR by default; send directly to OpenRouter after external consent."""
+    if not allow_external_ai:
+        if not local_ocr_available():
+            return AIExtractionResult("OCR_NOT_CONFIGURED", {})
+        return await asyncio.to_thread(_extract_local_ocr, content, content_type)
 
-    if not openrouter_configured():
-        return AIExtractionResult("NOT_CONFIGURED", {})
+    issue = openrouter_processing_issue()
+    if issue:
+        if local_ocr_available():
+            return await asyncio.to_thread(_extract_local_ocr, content, content_type)
+        return AIExtractionResult(issue, {})
 
     try:
         mime_type, image_parts = await asyncio.to_thread(
@@ -404,10 +722,6 @@ async def extract_identity_document(
             "temperature": 0,
             "max_tokens": 700,
             "response_format": {"type": "json_object"},
-            "provider": {
-                "zdr": bool(getattr(settings, "openrouter_require_zdr", False)),
-                "data_collection": "deny",
-            },
         })
 
         choices = completion.get("choices") if isinstance(completion, dict) else None
