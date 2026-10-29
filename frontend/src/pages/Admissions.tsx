@@ -220,13 +220,15 @@ function PublicIntake() {
 
   const waitForAI = async (fileId: string, initial: PublicApplicationFile) => {
     let current = initial;
+    let pollDelay = 800;
     for (let attempt = 0; attempt < 65 && current.ai_status === 'PROCESSING'; attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      await new Promise((resolve) => window.setTimeout(resolve, pollDelay));
       const result = await api.get<PublicApplicationFile[]>('/public/application/files');
       const updated = result.data.find((item) => item.id === fileId);
       if (!updated) return current;
       current = updated;
       setFiles((existing) => existing.map((item) => item.id === fileId ? updated : item));
+      pollDelay = Math.min(pollDelay + 100, 3000);
     }
     return current;
   };

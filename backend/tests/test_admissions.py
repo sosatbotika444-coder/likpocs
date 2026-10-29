@@ -249,6 +249,32 @@ def test_openrouter_failure_status_mapping_is_actionable_and_safe():
     assert _provider_failure_status(SimpleNamespace()) == "FAILED"
 
 
+def test_document_field_parser_accepts_labelled_plain_text_and_nested_json():
+    import json
+
+    from app.ai_extraction import _parse_fields
+
+    plain_text = """DOCUMENT TYPE: Passport
+Surname: KARIMOVA
+Given names: ISMOIL
+Date of birth: 11.04.2005
+Gender: Female
+"""
+    assert _parse_fields(plain_text) == {
+        "last_name_latin": "KARIMOVA",
+        "first_name_latin": "ISMOIL",
+        "birth_date": "2005-04-11",
+        "gender": "FEMALE",
+    }
+
+    nested = json.dumps({"fields": {"surname": "KARIMOVA", "given_names": "ISMOIL"}})
+    assert _parse_fields(nested) == {
+        "last_name_latin": "KARIMOVA",
+        "first_name_latin": "ISMOIL",
+    }
+    assert _parse_fields("{}") == {}
+
+
 def test_free_vision_model_is_blocked_for_private_identity_documents(
     client,
     database,
@@ -277,7 +303,7 @@ def test_free_vision_model_is_blocked_for_private_identity_documents(
     assert openrouter_processing_issue() == "UNSAFE_MODEL_ROUTE"
     assert openrouter_document_processing_available() is False
     result = asyncio.run(extract_identity_document(_png_bytes(), "image/png"))
-    assert result.status == "UNSAFE_MODEL_ROUTE"
+    assert result.status == "OCR_NOT_CONFIGURED"
     assert result.data == {}
 
     _, _, _, _, public_session = _workflow(
@@ -393,7 +419,7 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
     assert upload.json()["ai_status"] == "PROCESSING"
     uploaded_file_id = upload.json()["id"]
     failed_file = next(item for item in client.get("/api/public/application/files").json() if item["id"] == uploaded_file_id)
-    assert failed_file["ai_status"] == "FAILED"
+    assert failed_file["ai_status"] == "PROVIDER_UNAVAILABLE"
     assert failed_file["extracted_data"] == {}
 
     retry_without_consent = client.post(
@@ -417,6 +443,7 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
     }
     assert calls[0]["model"] == "test/private-vision-model"
     assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["max_tokens"] == 6000
     assert "provider" not in calls[0]
     assert "ocr_text" not in completed_file
 
