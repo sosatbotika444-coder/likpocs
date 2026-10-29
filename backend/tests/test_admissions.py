@@ -239,9 +239,10 @@ def test_openrouter_failure_status_mapping_is_actionable_and_safe():
 
     from app.ai_extraction import _provider_failure_status
 
-    assert _provider_failure_status(SimpleNamespace(status_code=401)) == "PROVIDER_CONFIG_ERROR"
-    assert _provider_failure_status(SimpleNamespace(status_code=402)) == "PROVIDER_CONFIG_ERROR"
-    assert _provider_failure_status(SimpleNamespace(status_code=404)) == "PROVIDER_CONFIG_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=401)) == "PROVIDER_AUTH_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=402)) == "PROVIDER_BILLING_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=403)) == "PROVIDER_ACCESS_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=404)) == "PROVIDER_MODEL_ERROR"
     assert _provider_failure_status(SimpleNamespace(status_code=429)) == "PROVIDER_RATE_LIMITED"
     assert _provider_failure_status(SimpleNamespace(status_code=400)) == "PROVIDER_REJECTED"
     assert _provider_failure_status(SimpleNamespace(status_code=503)) == "PROVIDER_UNAVAILABLE"

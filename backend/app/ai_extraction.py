@@ -323,10 +323,14 @@ def _provider_failure_status(exc: OpenAIError) -> str:
         return "FAILED"
     if status_code == 429:
         return "PROVIDER_RATE_LIMITED"
-    if status_code in {401, 402, 403, 404}:
-        # Includes invalid credentials, account limits, unavailable models,
-        # and provider policies that the account cannot enforce.
-        return "PROVIDER_CONFIG_ERROR"
+    if status_code == 401:
+        return "PROVIDER_AUTH_ERROR"
+    if status_code == 402:
+        return "PROVIDER_BILLING_ERROR"
+    if status_code == 403:
+        return "PROVIDER_ACCESS_ERROR"
+    if status_code == 404:
+        return "PROVIDER_MODEL_ERROR"
     if 400 <= status_code < 500:
         return "PROVIDER_REJECTED"
     if 500 <= status_code < 600:

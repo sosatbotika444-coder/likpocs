@@ -18,7 +18,11 @@ const aiStatusLabels: Record<string, string> = {
   COMPLETED: 'Maydonlar topildi', NO_FIELDS: 'Ma\u2019lumot topilmadi',
   NOT_CONFIGURED: 'AI sozlanmagan', CONSENT_REQUIRED: 'AI roziligi berilmagan',
   PROCESSING: 'AI tahlil qilmoqda', FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
-  PROVIDER_CONFIG_ERROR: 'AI xizmat sozlamasini tekshiring',
+  PROVIDER_CONFIG_ERROR: 'Eski yozuv: AI hisob sozlamasini tekshiring',
+  PROVIDER_AUTH_ERROR: 'OpenRouter API kalitini tekshiring',
+  PROVIDER_BILLING_ERROR: 'OpenRouter hisobi yoki limitini tekshiring',
+  PROVIDER_ACCESS_ERROR: 'OpenRouter hisob ruxsati yoki maxfiylik tarifini tekshiring',
+  PROVIDER_MODEL_ERROR: 'Model yoki rasm tahlili mavjudligini tekshiring',
   PROVIDER_RATE_LIMITED: 'AI so‘rovlari limiti vaqtincha tugadi',
   PROVIDER_UNAVAILABLE: 'AI xizmati vaqtincha ishlamayapti',
   PROVIDER_TIMEOUT: 'AI javobi vaqtida kelmadi',
@@ -27,18 +31,22 @@ const aiStatusLabels: Record<string, string> = {
   INVALID_RESPONSE: 'AI javobini o‘qib bo‘lmadi',
 };
 const aiErrorStatuses = new Set([
-  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
+  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
+  'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
   'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_DOCUMENT', 'INVALID_RESPONSE',
 ]);
 const aiRetryableStatuses = new Set([
-  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
+  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_AUTH_ERROR', 'PROVIDER_BILLING_ERROR', 'PROVIDER_ACCESS_ERROR',
+  'PROVIDER_MODEL_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
   'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_RESPONSE',
 ]);
 
 function aiFailureMessage(status: string) {
-  if (status === 'PROVIDER_CONFIG_ERROR') {
-    return 'AI xizmati sozlamasi yoki hisob cheklovi sabab tahlil bajarilmadi. Administrator sozlamalarni tekshirsin; tuzatilgach qayta urinib ko‘ring yoki ma’lumotni qo‘lda kiriting.';
-  }
+  if (status === 'PROVIDER_CONFIG_ERROR') return 'Oldingi tahlilda hisob yoki model sozlamasi aniqlanmagan. Administrator OpenRouter kaliti, hisob holati va maxfiylik talablariga mos modelni tekshirsin.';
+  if (status === 'PROVIDER_AUTH_ERROR') return 'OpenRouter API kaliti noto‘g‘ri yoki faol emas. Administrator kalitni tekshirib, so‘ng qayta urinib ko‘rsin.';
+  if (status === 'PROVIDER_BILLING_ERROR') return 'OpenRouter hisobi yoki foydalanish limiti so‘rovni to‘xtatdi. Hisob holati va limitni tekshirib, so‘ng qayta urinib ko‘ring.';
+  if (status === 'PROVIDER_ACCESS_ERROR') return 'OpenRouter hisobida modelga yoki maxfiylik siyosatiga ruxsat yo‘q. Hisob tarifi va ZDR/data_collection cheklovlariga mos provider mavjudligini tekshiring.';
+  if (status === 'PROVIDER_MODEL_ERROR') return 'Tanlangan model yoki provider rasm tahlilini qo‘llamasligi mumkin. Model nomi, mavjudligi va vision imkoniyatini tekshiring.';
   if (status === 'INVALID_DOCUMENT') return 'Hujjat o‘qilmadi. Sifatliroq rasm yuklang yoki maydonlarni qo‘lda kiriting.';
   if (status === 'PROVIDER_RATE_LIMITED') return 'AI so‘rovlari limiti vaqtincha tugadi. Birozdan keyin qayta urinib ko‘ring.';
   if (status === 'PROVIDER_UNAVAILABLE' || status === 'PROVIDER_TIMEOUT') return 'AI xizmati vaqtincha javob bermadi. Birozdan keyin qayta urinib ko‘ring.';
@@ -279,12 +287,13 @@ function PublicIntake() {
           ? 'Hujjat saqlandi. Avtomatik to’ldirish uchun AI roziligini belgilang.'
           : aiErrorStatuses.has(savedFile.ai_status)
             ? `Hujjat saqlandi. ${aiFailureMessage(savedFile.ai_status)}`
-          : savedFile.ai_status === 'PROCESSING'
-              ? 'Hujjat saqlandi. AI tahlili fon rejimida davom etmoqda.'
-              : savedFile.ai_status === 'NO_FIELDS'
-                ? 'Hujjat saqlandi, ammo undan maydon topilmadi.'
-                : 'Hujjat xavfsiz saqlandi.';
-      if (aiErrorStatuses.has(savedFile.ai_status)) notice.warning({ message });
+            : savedFile.ai_status === 'NO_FIELDS'
+              ? 'Hujjat saqlandi, ammo undan maydon topilmadi.'
+              : 'Hujjat xavfsiz saqlandi.';
+      if (savedFile.ai_status === 'PROCESSING') {
+        // The status row and completion poll communicate the background result.
+        // Avoid a stale "still running" toast beside the eventual failure toast.
+      } else if (aiErrorStatuses.has(savedFile.ai_status)) notice.warning({ message });
       else notice.success({ message, description: filled.length ? 'Ma’lumotlarni hujjat bilan solishtirib tekshiring.' : undefined });
     } catch (error) { notice.error({ message: uploaded ? 'Hujjat saqlandi, lekin AI natijasini olishda xatolik yuz berdi' : 'Fayl yuklanmadi', description: errorMessage(error) }); }
     finally { setProgress((current) => { const nextValue = { ...current }; delete nextValue[key]; return nextValue; }); }
