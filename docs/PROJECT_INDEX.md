@@ -186,12 +186,12 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 ## Frontend
 
 - frontend/src/main.tsx: монтирует React, Ant Design Uzbek locale, dayjs locale, CSS и AuthProvider.
-- frontend/src/App.tsx: App маршруты; Login, Shell, Protected, Home, OperatorOnly; лениво загружает страницы. Маршруты сотрудников требуют пользователя, вкладки пользователей и аудита скрыты/защищены также проверкой OPERATOR в клиенте.
+- frontend/src/App.tsx: App маршруты; Login, Shell, Protected, Home, OperatorOnly; лениво загружает страницы. Маршруты сотрудников требуют пользователя, вкладки пользователей и аудита скрыты/защищены также проверкой OPERATOR в клиенте. Только маршрут `/app` получает компактную оболочку панели; на ширине от 576 px сохраняется боковая навигация, остальные экраны продолжают использовать обычную адаптивную оболочку.
 - frontend/src/auth.tsx: AuthProvider и useAuth (login, logout, reloadUser, начальная проверка сессии).
 - frontend/src/api.ts: Axios api с Bearer header, автоматическим однократным refresh, saveSession, clearSession, hasSession, errorMessage. Добавляйте общие HTTP-поведения здесь; никогда не помещайте серверный секрет в VITE_ переменную.
 - frontend/src/types.ts: TypeScript-контракты API (Role, User, Room, Resident, BillingPeriod/Change, Payment/Adjustment, Expense, Dashboard, Settings, Audit, admissions и public session types).
 - frontend/src/locales/uz.ts: единственное общее место для подписей на узбекском латинском; moneyToMinorUnits, isPositiveMoney, sumMoney, formatMoney, formatDate, todayUzbekistan, statusLabel, auditActionLabel, auditEntityLabel, auditDetailLabel.
-- frontend/src/pages/Dashboard.tsx: панель состояния и графики; Metric, moneyAxis.
+- frontend/src/pages/Dashboard.tsx: панель состояния; `Dashboard` загружает существующий `GET /api/dashboard` (доступ «Персонал»), `Metric` иконками/значениями показывает жителей, занятость и фактический доход, `moneyAxis` форматирует ось графика, `initials` формирует буквенные аватары. Графики показывают заполненность комнат столбцами, общую занятость мест кольцевой диаграммой и тренд дохода линией; правая колонка показывает недавно заселённых жителей, финансовые показатели и последние платежи из того же ответа API. Новых API, моделей или миграций нет.
 - frontend/src/pages/Residents.tsx: список, карточка, фильтры, заселение/выезд, тариф, история оплат; cleanDate, statusTag.
 - frontend/src/pages/Rooms.tsx: корпуса и комнаты, вместимость, доступные места и цена.
 - frontend/src/pages/Admissions.tsx: PublicIntake/PublicApplication poll processing and fill only blank fields; show the local OCR consent separately from optional external OpenRouter consent; show OCR confidence policy, statuses, and retry instructions. Provider request failures have actionable public labels without exposing response bodies. StaffAdmissions shows local and external processing readiness and displays extracted suggestions for human review.
@@ -202,7 +202,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 - frontend/src/pages/AdminGuide.tsx: узбекское руководство персоналу.
 - frontend/src/pages/Landing.tsx: публичная лендинг-страница; DashboardPreview.
 - frontend/src/pages/shared.tsx: переиспользуемые PageHeading, Panel, EmptyBlock, Actions.
-- frontend/src/styles.css, landing.css, app-overrides.css: базовые стили SPA, лендинга и точечные переопределения.
+- frontend/src/styles.css, landing.css, app-overrides.css: базовые стили SPA и лендинга; `app-overrides.css` содержит стили, ограниченные оболочкой `/app`, для центрированного компактного окна, светлой узкой навигации, сетки панели и мобильной компоновки.
 
 ## Именной каталог функций
 
@@ -227,6 +227,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 - backend/tests/test_reports.py: tday, test_report_formats_return_exports_with_uzbek_headers, test_spreadsheet_exports_neutralize_formula_like_text_but_keep_numeric_values.
 - frontend/src/api.ts: saveSession, clearSession, hasSession, errorMessage. frontend/src/auth.tsx: AuthProvider, useAuth. frontend/src/App.tsx: Login, Shell, Protected, Home, OperatorOnly, App.
 - frontend/src/locales/uz.ts: moneyToMinorUnits, isPositiveMoney, sumMoney, formatMoney, formatDate, todayUzbekistan, statusLabel, auditActionLabel, auditEntityLabel, auditDetailLabel.
+- frontend/src/pages/Dashboard.tsx: Dashboard, Metric, initials, moneyAxis. Dashboard uses only staff-scoped `/api/dashboard`; it presents current hostel data in a compact responsive layout, with recent residents/payments and finance details still visible. The visuals derive from the existing occupancy and revenue fields.
 - frontend/src/pages/Admissions.tsx: PublicIntake/PublicApplication poll processing and fill only blank fields; show the local OCR consent separately from optional external OpenRouter consent; show OCR confidence policy, statuses, and retry instructions. StaffAdmissions shows local and external processing readiness and displays extracted suggestions for human review.
 - frontend/src/pages/Residents.tsx: cleanDate, statusTag, Residents. Settings.tsx: auditValue, SettingsPage. Также экспортируются компоненты Expenses, Payments, Reports, Rooms, AdminGuide и общие компоненты PageHeading, Panel, EmptyBlock, Actions.
 
@@ -261,6 +262,8 @@ Document extraction changes do not require a schema migration. `ApplicationFile.
 | test_migrations.py | построение и обратное удаление схемы и миграционный backfill. |
 
 Verification for the local OCR changes: Python `py_compile` passed; frontend TypeScript `tsc --noEmit` and Vite production build passed (existing warning: one chunk is over 500 kB). Backend tests were not run. Tesseract and Docker are unavailable in this Windows environment, so the OCR engine and Docker image were not executed here; OCR quality still needs evaluation with synthetic, non-personal samples.
+
+Dashboard visual refinement (2026-10-30): frontend TypeScript `tsc --noEmit -p tsconfig.json` and Vite production build passed; Vite reported the existing large-chunk warning. A fresh browser screenshot and reference comparison could not be completed: automatic review rejected launching headless Edge at the local dev URL, so rendered visual verification remains outstanding. The dashboard retains the existing staff-authorized API and data; no backend tests or schema changes apply.
 
 ## Конфигурация и развёртывание
 

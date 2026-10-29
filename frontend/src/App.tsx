@@ -73,7 +73,8 @@ function Shell() {
   const location = useLocation();
   const navigate = useNavigate();
   const screens = Grid.useBreakpoint();
-  const mobile = !screens.md;
+  const compactDashboard = location.pathname === '/app' && Boolean(screens.sm);
+  const mobile = !screens.md && !compactDashboard;
   const [drawer, setDrawer] = useState(false);
   const [alerts, setAlerts] = useState<AppNotification[]>([]);
   const [notice, contextHolder] = notification.useNotification();
@@ -116,7 +117,7 @@ function Shell() {
     onClick: async () => { await api.post('/notifications/read-all'); await loadAlerts(); },
   };
 
-  return <Layout className="app-layout">
+  return <Layout className={`app-layout${location.pathname === '/app' ? ' dashboard-app' : ''}`}>
     {contextHolder}
     {!mobile && <Sider className="app-sider" width={248} theme="dark">{sidebar}</Sider>}
     <Layout className="inner-layout">
