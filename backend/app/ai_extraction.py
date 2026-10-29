@@ -311,6 +311,27 @@ def _parse_fields(value: str) -> dict[str, str]:
     return fields
 
 
+async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
+    """Call OpenRouter through its OpenAI-compatible chat completions API."""
+    async with AsyncOpenAI(
+        base_url=_OPENROUTER_BASE_URL,
+        api_key=settings.openrouter_api_key.strip(),
+        timeout=_TIMEOUT_SECONDS,
+        # The browser no longer waits on this request; avoid hidden long retries.
+        max_retries=0,
+    ) as client:
+        completion = await client.chat.completions.create(
+            model=payload["model"],
+            messages=payload["messages"],
+            temperature=payload["temperature"],
+            max_tokens=payload["max_tokens"],
+            response_format=payload["response_format"],
+            extra_headers={"X-OpenRouter-Title": "RS Best Hostel"},
+            extra_body={"provider": payload["provider"]},
+        )
+    return completion.model_dump()
+
+
 async def extract_identity_document(
     content: bytes,
     content_type: str,
@@ -341,55 +362,40 @@ async def extract_identity_document(
                 },
             })
 
-        api_key = settings.openrouter_api_key.strip()
-
-        async with AsyncOpenAI(
-            base_url=_OPENROUTER_BASE_URL,
-            api_key=api_key,
-            timeout=_TIMEOUT_SECONDS,
-            max_retries=1,
-        ) as client:
-            completion = await client.chat.completions.create(
-                model=settings.openrouter_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract document fields for a form. "
-                            "Return valid JSON only."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": user_content,
-                    },
-                ],
-                temperature=0,
-                max_tokens=700,
-                response_format={"type": "json_object"},
-                extra_headers={
-                    "X-OpenRouter-Title": "RS Best Hostel",
+        completion = await _post_chat_completion({
+            "model": settings.openrouter_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract document fields for a form. "
+                        "Return valid JSON only."
+                    ),
                 },
-                extra_body={
-                    "provider": {
-                        "zdr": bool(
-                            getattr(
-                                settings,
-                                "openrouter_require_zdr",
-                                False,
-                            )
-                        ),
-                        "data_collection": "deny",
-                        "allow_fallbacks": False,
-                    },
-                },
-            )
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0,
+            "max_tokens": 700,
+            "response_format": {"type": "json_object"},
+            "provider": {
+                "zdr": bool(getattr(settings, "openrouter_require_zdr", False)),
+                "data_collection": "deny",
+            },
+        })
 
-        if not completion.choices:
+        choices = completion.get("choices") if isinstance(completion, dict) else None
+        if not choices:
             logger.warning("OpenRouter returned no choices")
             return AIExtractionResult("FAILED", {})
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        response_text = message.get("content") if isinstance(message, dict) else None
 
-        response_text = completion.choices[0].message.content
+        if isinstance(response_text, list):
+            response_text = "".join(
+                part.get("text", "")
+                for part in response_text
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
 
         if not isinstance(response_text, str):
             return AIExtractionResult("FAILED", {})

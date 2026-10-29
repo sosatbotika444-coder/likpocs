@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import re
+import logging
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -10,10 +10,10 @@ from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import EmailStr, TypeAdapter, ValidationError
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -76,6 +76,7 @@ from app.schemas import (
 
 staff_router = APIRouter(prefix="/api")
 public_router = APIRouter(prefix="/api/public")
+logger = logging.getLogger(__name__)
 SESSION_COOKIE = "dormflow.application"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
 PHONE_FIELDS = {"phone", "emergency_phone"}
@@ -1006,10 +1007,43 @@ def _public_file_out(row: ApplicationFile) -> ApplicationFileOut:
     return ApplicationFileOut.model_validate(row)
 
 
+async def _run_file_extraction(db: Session, row: ApplicationFile, content: bytes) -> None:
+    """Finish consented extraction after the upload response has been sent."""
+    result = await extract_identity_document(content, row.content_type)
+    try:
+        # The conditional update makes deletion/replacement win even when it
+        # races the provider response; a late result cannot restore erased PII.
+        db.execute(
+            update(ApplicationFile)
+            .where(
+                ApplicationFile.id == row.id,
+                ApplicationFile.deleted_at.is_(None),
+                ApplicationFile.ai_status == "PROCESSING",
+            )
+            .values(ai_status=result.status, extracted_data=result.data)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        db.refresh(row)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Could not save document extraction result: %s", type(exc).__name__)
+
+
+def _schedule_file_extraction(
+    background_tasks: BackgroundTasks,
+    db: Session,
+    row: ApplicationFile,
+    content: bytes,
+) -> None:
+    background_tasks.add_task(_run_file_extraction, db, row, content)
+
+
 @public_router.post("/application/files", response_model=ApplicationFileOut, status_code=201)
 async def upload_public_file(
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     kind: Literal["PHOTO", "DOCUMENT"] = Form(...),
     document_type: str = Form(default=""),
     upload: UploadFile = File(...),
@@ -1037,12 +1071,12 @@ async def upload_public_file(
     suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}[content_type]
     ai_status = "NOT_CONFIGURED"
     extracted_data: dict[str, str] = {}
+    should_extract = False
     if kind == "DOCUMENT" and openrouter_configured():
         if ai_processing_consent:
             application.ai_processing_consented_at = utcnow()
-            ai_result = await extract_identity_document(content, content_type)
-            ai_status = ai_result.status
-            extracted_data = ai_result.data
+            ai_status = "PROCESSING"
+            should_extract = True
         else:
             ai_status = "CONSENT_REQUIRED"
     object_key = f"admissions/{application.id}/{uuid4().hex}{suffix}"
@@ -1108,6 +1142,58 @@ async def upload_public_file(
             except Exception:
                 # The replacement row is committed; the scheduled purge retries the old private object.
                 continue
+    if should_extract:
+        _schedule_file_extraction(background_tasks, db, row, content)
+    return _public_file_out(row)
+
+
+@public_router.post(
+    "/application/files/{file_id}/extract",
+    response_model=ApplicationFileOut,
+    status_code=202,
+)
+def retry_public_file_extraction(
+    file_id: UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+    ai_processing_consent: bool = Header(default=False, alias="X-AI-Processing-Consent"),
+) -> ApplicationFileOut:
+    _rate_limit(db, request, "ai-extraction", 20, 3600)
+    application, _ = _student_write_session(request, db, csrf_token)
+    if application.status not in {"DRAFT", "NEEDS_INFO"}:
+        raise HTTPException(status_code=409, detail="Yakunlangan ariza hujjatini qayta tahlil qilib bo‘lmaydi.")
+    if not ai_processing_consent:
+        raise HTTPException(status_code=403, detail="AI tahlilini boshlash uchun alohida rozilik bering.")
+    if not openrouter_configured():
+        raise HTTPException(status_code=503, detail="AI xizmati sozlanmagan.")
+
+    row = db.scalar(select(ApplicationFile).where(
+        ApplicationFile.id == file_id,
+        ApplicationFile.application_id == application.id,
+        ApplicationFile.deleted_at.is_(None),
+    ))
+    if not row or row.kind != "DOCUMENT":
+        raise HTTPException(status_code=404, detail="Hujjat topilmadi.")
+    if row.ai_status == "PROCESSING":
+        raise HTTPException(status_code=409, detail="Hujjat hozir tahlil qilinmoqda.")
+    if row.ai_status in {"COMPLETED", "NO_FIELDS"}:
+        return _public_file_out(row)
+
+    content = storage.read(row.object_key, db)
+    if not content:
+        raise HTTPException(status_code=503, detail="Saqlangan hujjatni o‘qib bo‘lmadi.")
+    if len(content) > settings.file_max_bytes:
+        raise HTTPException(status_code=413, detail="Hujjat hajmi ruxsat etilgan chegaradan oshdi.")
+
+    application.ai_processing_consented_at = utcnow()
+    row.ai_status = "PROCESSING"
+    row.extracted_data = {}
+    audit(db, None, "APPLICATION_AI_PROCESSING_CONSENTED", "StudentApplication", application.id, {"provider": "OpenRouter", "route": settings.openrouter_model})
+    db.commit()
+    db.refresh(row)
+    _schedule_file_extraction(background_tasks, db, row, content)
     return _public_file_out(row)
 
 

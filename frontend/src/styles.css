@@ -17,3 +17,4 @@
 @media(max-width:767px){.guide-action{grid-template-columns:1fr;gap:4px}.admin-guide .ant-card-body{padding:14px}.guide-card .ant-card-head{padding-inline:14px}}
 
 .ai-consent-box{display:grid;gap:9px;margin:12px 0 16px;padding:12px;border:1px solid #eadfb9;border-radius:9px;background:#fffdf5}.ai-consent-box .ant-alert{padding:8px 10px;border:0;background:transparent}.ai-consent-box .ant-alert-message{font-size:11px}.ai-consent-box .ant-alert-description{font-size:10px;line-height:1.5}.ai-consent-box .ant-checkbox-wrapper{font-size:11px;color:#46594d}
+.public-file-result{grid-column:1/-1;display:flex;align-items:center;gap:7px;flex-wrap:wrap}.public-file-result small{flex-basis:100%}.public-file-result .ant-tag{margin-inline-end:0}

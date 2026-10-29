@@ -28,3 +28,4 @@
 - Add or update isolated tests for new rules, especially finance, authorization, migrations, and Uzbek-visible workflows. Never point tests at a production or personal local database.
 - Run the frontend typecheck/build after frontend changes and the backend tests after backend changes when dependencies are available.
 - Prefer small, reversible schema and UI changes. Keep examples and project prompts aligned with the current implementation.
+- Read docs/PROJECT_INDEX.md before changing code. Update it in the same task for every project change: document every new or changed function and API route (including its authorization), data/schema/migration, UI route, cross-layer workflow, integration and configuration setting, plus relevant verification. Keep the file and symbol inventories accurate; correct stale entries instead of appending contradictions. Never copy secrets, .env contents, guest documents or personal data into the index.

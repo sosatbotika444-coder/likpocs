@@ -17,7 +17,7 @@ const statusLabels: Record<string, string> = {
 const aiStatusLabels: Record<string, string> = {
   COMPLETED: 'Maydonlar topildi', NO_FIELDS: 'Ma\u2019lumot topilmadi',
   NOT_CONFIGURED: 'AI sozlanmagan', CONSENT_REQUIRED: 'AI roziligi berilmagan',
-  FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
+  PROCESSING: 'AI tahlil qilmoqda', FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
 };
 const dataLabels: Record<string, string> = {
   first_name_latin: 'Ism (lotin)', last_name_latin: 'Familiya (lotin)', middle_name_latin: 'Otasining ismi (lotin)',
@@ -55,6 +55,8 @@ function PublicIntake() {
   const [codeEntry, setCodeEntry] = useState('');
   const [accessRequired, setAccessRequired] = useState(false);
   const [progress, setProgress] = useState<Record<string, number>>({});
+  const [retryingFileIds, setRetryingFileIds] = useState<string[]>([]);
+  const processingPolls = useRef<Set<string>>(new Set());
   const [autofilledFields, setAutofilledFields] = useState<string[]>([]);
   const [aiProcessingConsent, setAIProcessingConsent] = useState(false);
   const exchangeStarted = useRef(false);
@@ -170,6 +172,54 @@ function PublicIntake() {
     return payload;
   };
 
+  const waitForAI = async (fileId: string, initial: PublicApplicationFile) => {
+    let current = initial;
+    for (let attempt = 0; attempt < 65 && current.ai_status === 'PROCESSING'; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+      const result = await api.get<PublicApplicationFile[]>('/public/application/files');
+      const updated = result.data.find((item) => item.id === fileId);
+      if (!updated) return current;
+      current = updated;
+      setFiles((existing) => existing.map((item) => item.id === fileId ? updated : item));
+    }
+    return current;
+  };
+
+  const retryAI = async (file: PublicApplicationFile) => {
+    if (!aiProcessingConsent) {
+      notice.warning({ message: 'Avval AI tahliliga rozilik bering.' });
+      return;
+    }
+    setRetryingFileIds((current) => [...current, file.id]);
+    try {
+      const result = await api.post<PublicApplicationFile>(`/public/application/files/${file.id}/extract`, null, {
+        headers: { 'X-CSRF-Token': csrf, 'X-AI-Processing-Consent': 'true' },
+      });
+      setFiles((current) => current.map((item) => item.id === file.id ? result.data : item));
+      notice.info({ message: 'Hujjat AI tahliliga yuborildi.' });
+    } catch (error) {
+      notice.error({ message: 'AI tahlilini qayta boshlash imkoni bo‘lmadi', description: errorMessage(error) });
+    } finally {
+      setRetryingFileIds((current) => current.filter((id) => id !== file.id));
+    }
+  };
+
+  useEffect(() => {
+    for (const file of files) {
+      if (file.ai_status !== 'PROCESSING' || processingPolls.current.has(file.id)) continue;
+      processingPolls.current.add(file.id);
+      void waitForAI(file.id, file)
+        .then((completed) => {
+          applyExtractedData([completed]);
+          if (completed.ai_status === 'FAILED') notice.warning({ message: 'AI tahlili bajarilmadi. Qayta urining yoki maydonlarni qo‘lda to‘ldiring.' });
+          else if (completed.ai_status === 'NO_FIELDS') notice.info({ message: 'Hujjatdan maydon topilmadi.' });
+          else if (completed.ai_status === 'COMPLETED') notice.success({ message: 'Hujjat tahlili yakunlandi.' });
+        })
+        .catch(() => notice.warning({ message: 'Hujjat saqlandi. AI natijasini yuklashda xatolik yuz berdi.' }))
+        .finally(() => processingPolls.current.delete(file.id));
+    }
+  }, [files]);
+
   const next = async () => {
     setBusy(true);
     try {
@@ -188,22 +238,30 @@ function PublicIntake() {
     body.append('kind', kind);
     body.append('document_type', documentType);
     body.append('upload', file);
+    let uploaded = false;
     try {
       const result = await api.post<PublicApplicationFile>('/public/application/files', body, {
         headers: { 'X-CSRF-Token': csrf, ...(kind === 'DOCUMENT' && aiProcessingConsent ? { 'X-AI-Processing-Consent': 'true' } : {}) },
-        onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.round((event.loaded * 100) / event.total) : 45 })),
+        onUploadProgress: (event) => setProgress((current) => ({ ...current, [key]: event.total ? Math.min(95, Math.round((event.loaded * 95) / event.total)) : 45 })),
       });
+      uploaded = true;
       setFiles((current) => [...current.filter((item) => !(item.kind === kind && (kind === 'PHOTO' || item.document_type === documentType))), result.data]);
-      const filled = applyExtractedData([result.data]);
+      const savedFile = result.data;
+      const filled = applyExtractedData([savedFile]);
       const message = filled.length
         ? `Hujjat yuklandi. ${filled.length} ta maydon to’ldirildi.`
         : result.data.ai_status === 'CONSENT_REQUIRED'
           ? 'Hujjat saqlandi. Avtomatik to’ldirish uchun AI roziligini belgilang.'
-          : result.data.ai_status === 'FAILED'
-            ? 'Hujjat saqlandi, AI tahlili bajarilmadi. Maydonlarni qo’lda to’ldiring.'
-            : 'Hujjat xavfsiz saqlandi.';
-      notice.success({ message, description: filled.length ? 'Ma’lumotlarni hujjat bilan solishtirib tekshiring.' : undefined });
-    } catch (error) { notice.error({ message: 'Fayl yuklanmadi', description: errorMessage(error) }); }
+          : savedFile.ai_status === 'FAILED'
+            ? 'Hujjat saqlandi. AI tahlili bajarilmadi; qayta urinib ko’ring.'
+          : savedFile.ai_status === 'PROCESSING'
+              ? 'Hujjat saqlandi. AI tahlili fon rejimida davom etmoqda.'
+              : savedFile.ai_status === 'NO_FIELDS'
+                ? 'Hujjat saqlandi, ammo undan maydon topilmadi.'
+                : 'Hujjat xavfsiz saqlandi.';
+      if (savedFile.ai_status === 'FAILED') notice.warning({ message });
+      else notice.success({ message, description: filled.length ? 'Ma’lumotlarni hujjat bilan solishtirib tekshiring.' : undefined });
+    } catch (error) { notice.error({ message: uploaded ? 'Hujjat saqlandi, lekin AI natijasini olishda xatolik yuz berdi' : 'Fayl yuklanmadi', description: errorMessage(error) }); }
     finally { setProgress((current) => { const nextValue = { ...current }; delete nextValue[key]; return nextValue; }); }
   };
 
@@ -232,7 +290,7 @@ function PublicIntake() {
 
   const fileButtons = (requestedOnly: boolean, includePhoto = true, documentTypes = campaign.document_types) => <div className="public-upload-list">
     {includePhoto && (!requestedOnly || isFileRequested('photo')) && <section className="public-upload-item"><div><strong>Yashovchi surati</strong><small>Kamera bilan oling yoki rasm yuklang.</small></div><label className="upload-control"><input type="file" accept="image/jpeg,image/png,image/webp" capture="user" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'PHOTO'); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'PHOTO') ? 'Suratni almashtirish' : 'Surat tanlash'}</span></label>{progress.PHOTO !== undefined && <Progress percent={progress.PHOTO} size="small"/>}{files.filter((item) => item.kind === 'PHOTO').map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>}
-    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>)}
+    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <div className="public-file-result" key={item.id}><Tag color="green">{item.original_name}</Tag><Tag color={item.ai_status === 'FAILED' ? 'red' : item.ai_status === 'COMPLETED' ? 'green' : 'default'}>{aiStatusLabels[item.ai_status] || item.ai_status}</Tag>{item.ai_status === 'PROCESSING' && <small>Hujjat tekshirilmoqda. Maydonlar tayyor bo‘lganda avtomatik kiritiladi.</small>}{item.ai_status === 'FAILED' && <Button size="small" loading={retryingFileIds.includes(item.id)} onClick={() => void retryAI(item)}>AI tahlilini qayta urinish</Button>}</div>)}</section>)}
   </div>;
 
 

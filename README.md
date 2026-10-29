@@ -1,5 +1,7 @@
 # RS Best Hostel
 
+Project architecture, API routes and authorization, module/function map, and index maintenance rules are documented in [docs/PROJECT_INDEX.md](docs/PROJECT_INDEX.md). Read it together with AGENTS.md before making code changes.
+
 RS Best Hostel is a full-stack dormitory operations app. The React/TypeScript client is in `frontend/`; the FastAPI service, SQLAlchemy models, Alembic migrations, and pytest suite are in `backend/`. PostgreSQL is the persistent database. The interface is Uzbek (Latin) and uses the Uzbekistan time zone by default.
 
 ## Start the full stack with Docker Compose

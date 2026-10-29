@@ -135,10 +135,18 @@ class PrivateFileStorage:
         )
 
     def read(self, object_key: str, db: Session) -> bytes | None:
-        if self.backend != "postgres":
-            raise RuntimeError("Database reads are available only for PostgreSQL storage")
-        blob = db.get(ApplicationFileBlob, object_key)
-        return blob.content if blob else None
+        if self.backend == "postgres":
+            blob = db.get(ApplicationFileBlob, object_key)
+            return blob.content if blob else None
+        if self.backend == "s3":
+            response = self._s3().get_object(Bucket=settings.s3_bucket, Key=object_key)
+            body = response["Body"]
+            try:
+                return body.read(settings.file_max_bytes + 1)
+            finally:
+                body.close()
+        path = self._local_path(object_key)
+        return path.read_bytes() if path.exists() else None
 
     def delete(self, object_key: str, db: Session | None = None) -> None:
         if self.backend == "s3":

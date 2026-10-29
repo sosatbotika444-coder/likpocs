@@ -244,6 +244,8 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
 
     async def fake_openrouter(payload):
         calls.append(payload)
+        if len(calls) == 1:
+            raise RuntimeError("simulated temporary provider failure")
         return {"choices": [{"message": {"content": json.dumps({
             "last_name_latin": "KARIMOVA",
             "first_name_latin": "ISMOIL",
@@ -277,8 +279,26 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
         files={"upload": ("identity.png", _png_bytes(), "image/png")},
     )
     assert upload.status_code == 201, upload.text
-    assert upload.json()["ai_status"] == "COMPLETED"
-    assert upload.json()["extracted_data"] == {
+    assert upload.json()["ai_status"] == "PROCESSING"
+    uploaded_file_id = upload.json()["id"]
+    failed_file = next(item for item in client.get("/api/public/application/files").json() if item["id"] == uploaded_file_id)
+    assert failed_file["ai_status"] == "FAILED"
+    assert failed_file["extracted_data"] == {}
+
+    retry_without_consent = client.post(
+        f"/api/public/application/files/{uploaded_file_id}/extract",
+        headers={"X-CSRF-Token": public_session["csrf_token"]},
+    )
+    assert retry_without_consent.status_code == 403
+
+    retried = client.post(
+        f"/api/public/application/files/{uploaded_file_id}/extract",
+        headers={"X-CSRF-Token": public_session["csrf_token"], "X-AI-Processing-Consent": "true"},
+    )
+    assert retried.status_code == 202, retried.text
+    completed_file = next(item for item in client.get("/api/public/application/files").json() if item["id"] == uploaded_file_id)
+    assert completed_file["ai_status"] == "COMPLETED"
+    assert completed_file["extracted_data"] == {
         "last_name_latin": "KARIMOVA",
         "first_name_latin": "ISMOIL",
         "middle_name_latin": "ANVAR QIZI",
@@ -287,13 +307,14 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
     assert calls[0]["model"] == "openrouter/free"
     assert calls[0]["provider"]["data_collection"] == "deny"
     assert calls[0]["provider"]["zdr"] is True
-    assert "ocr_text" not in upload.json()
+    assert "allow_fallbacks" not in calls[0]["provider"]
+    assert "ocr_text" not in completed_file
 
     public_files = client.get("/api/public/application/files")
     assert public_files.status_code == 200
     assert all("ocr_text" not in file for file in public_files.json())
     public_document = next(file for file in public_files.json() if file["kind"] == "DOCUMENT")
-    assert public_document["extracted_data"] == upload.json()["extracted_data"]
+    assert public_document["extracted_data"] == completed_file["extracted_data"]
 
     application = database.scalar(select(StudentApplication))
     database.refresh(application)
@@ -304,7 +325,7 @@ def test_openrouter_suggestions_require_consent_and_are_private(client, database
     assert detail.status_code == 200, detail.text
     staff_file = next(file for file in detail.json()["files"] if file["id"] == str(attachment.id))
     assert staff_file["ai_status"] == "COMPLETED"
-    assert staff_file["extracted_data"] == upload.json()["extracted_data"]
+    assert staff_file["extracted_data"] == completed_file["extracted_data"]
 
     removed = client.delete(f"/api/admissions/applications/{application.id}/files/{attachment.id}", headers=admin)
     assert removed.status_code == 204
