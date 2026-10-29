@@ -16,7 +16,7 @@ from typing import Any
 
 import pymupdf
 from PIL import Image, ImageOps, UnidentifiedImageError
-from openai import AsyncOpenAI, OpenAIError
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, OpenAIError
 
 from app.config import settings
 
@@ -311,6 +311,29 @@ def _parse_fields(value: str) -> dict[str, str]:
     return fields
 
 
+def _provider_failure_status(exc: OpenAIError) -> str:
+    """Return a safe, user-displayable category without exposing provider text."""
+    if isinstance(exc, APITimeoutError):
+        return "PROVIDER_TIMEOUT"
+    if isinstance(exc, APIConnectionError):
+        return "PROVIDER_UNAVAILABLE"
+
+    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int):
+        return "FAILED"
+    if status_code == 429:
+        return "PROVIDER_RATE_LIMITED"
+    if status_code in {401, 402, 403, 404}:
+        # Includes invalid credentials, account limits, unavailable models,
+        # and provider policies that the account cannot enforce.
+        return "PROVIDER_CONFIG_ERROR"
+    if 400 <= status_code < 500:
+        return "PROVIDER_REJECTED"
+    if 500 <= status_code < 600:
+        return "PROVIDER_UNAVAILABLE"
+    return "FAILED"
+
+
 async def _post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
     """Call OpenRouter through its OpenAI-compatible chat completions API."""
     async with AsyncOpenAI(
@@ -386,7 +409,7 @@ async def extract_identity_document(
         choices = completion.get("choices") if isinstance(completion, dict) else None
         if not choices:
             logger.warning("OpenRouter returned no choices")
-            return AIExtractionResult("FAILED", {})
+            return AIExtractionResult("INVALID_RESPONSE", {})
         message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
         response_text = message.get("content") if isinstance(message, dict) else None
 
@@ -398,7 +421,7 @@ async def extract_identity_document(
             )
 
         if not isinstance(response_text, str):
-            return AIExtractionResult("FAILED", {})
+            return AIExtractionResult("INVALID_RESPONSE", {})
 
         fields = _parse_fields(response_text)
 
@@ -408,19 +431,24 @@ async def extract_identity_document(
         )
 
     except OpenAIError as exc:
-        # Log the exception class only; never log document contents or keys.
+        # Log only a safe category and HTTP status. Provider bodies can contain
+        # submitted document data, so never log exception text or response body.
+        status_code = getattr(exc, "status_code", None)
+        if not isinstance(status_code, int) or not 100 <= status_code <= 599:
+            status_code = "unknown"
         logger.warning(
-            "OpenRouter SDK request failed: %s",
+            "OpenRouter SDK request failed: type=%s status_code=%s",
             type(exc).__name__,
+            status_code,
         )
-        return AIExtractionResult("FAILED", {})
+        return AIExtractionResult(_provider_failure_status(exc), {})
 
     except (ValueError, UnidentifiedImageError, pymupdf.FileDataError) as exc:
         logger.warning(
             "Document processing failed: %s",
             type(exc).__name__,
         )
-        return AIExtractionResult("FAILED", {})
+        return AIExtractionResult("INVALID_DOCUMENT", {})
 
     except Exception as exc:
         logger.error(

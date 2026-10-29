@@ -18,7 +18,32 @@ const aiStatusLabels: Record<string, string> = {
   COMPLETED: 'Maydonlar topildi', NO_FIELDS: 'Ma\u2019lumot topilmadi',
   NOT_CONFIGURED: 'AI sozlanmagan', CONSENT_REQUIRED: 'AI roziligi berilmagan',
   PROCESSING: 'AI tahlil qilmoqda', FAILED: 'AI tahlili bajarilmadi', DELETED: 'O\u2018chirildi',
+  PROVIDER_CONFIG_ERROR: 'AI xizmat sozlamasini tekshiring',
+  PROVIDER_RATE_LIMITED: 'AI so‘rovlari limiti vaqtincha tugadi',
+  PROVIDER_UNAVAILABLE: 'AI xizmati vaqtincha ishlamayapti',
+  PROVIDER_TIMEOUT: 'AI javobi vaqtida kelmadi',
+  PROVIDER_REJECTED: 'AI xizmati so‘rovni qabul qilmadi',
+  INVALID_DOCUMENT: 'Hujjatni o‘qib bo‘lmadi',
+  INVALID_RESPONSE: 'AI javobini o‘qib bo‘lmadi',
 };
+const aiErrorStatuses = new Set([
+  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
+  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_DOCUMENT', 'INVALID_RESPONSE',
+]);
+const aiRetryableStatuses = new Set([
+  'FAILED', 'PROVIDER_CONFIG_ERROR', 'PROVIDER_RATE_LIMITED', 'PROVIDER_UNAVAILABLE',
+  'PROVIDER_TIMEOUT', 'PROVIDER_REJECTED', 'INVALID_RESPONSE',
+]);
+
+function aiFailureMessage(status: string) {
+  if (status === 'PROVIDER_CONFIG_ERROR') {
+    return 'AI xizmati sozlamasi yoki hisob cheklovi sabab tahlil bajarilmadi. Administrator sozlamalarni tekshirsin; tuzatilgach qayta urinib ko‘ring yoki ma’lumotni qo‘lda kiriting.';
+  }
+  if (status === 'INVALID_DOCUMENT') return 'Hujjat o‘qilmadi. Sifatliroq rasm yuklang yoki maydonlarni qo‘lda kiriting.';
+  if (status === 'PROVIDER_RATE_LIMITED') return 'AI so‘rovlari limiti vaqtincha tugadi. Birozdan keyin qayta urinib ko‘ring.';
+  if (status === 'PROVIDER_UNAVAILABLE' || status === 'PROVIDER_TIMEOUT') return 'AI xizmati vaqtincha javob bermadi. Birozdan keyin qayta urinib ko‘ring.';
+  return 'AI tahlili yakunlanmadi. Qayta urinib ko‘ring yoki maydonlarni qo‘lda to‘ldiring.';
+}
 const dataLabels: Record<string, string> = {
   first_name_latin: 'Ism (lotin)', last_name_latin: 'Familiya (lotin)', middle_name_latin: 'Otasining ismi (lotin)',
   first_name_cyrillic: 'Ism (kirill)', last_name_cyrillic: 'Familiya (kirill)', middle_name_cyrillic: 'Otasining ismi (kirill)',
@@ -211,7 +236,7 @@ function PublicIntake() {
       void waitForAI(file.id, file)
         .then((completed) => {
           applyExtractedData([completed]);
-          if (completed.ai_status === 'FAILED') notice.warning({ message: 'AI tahlili bajarilmadi. Qayta urining yoki maydonlarni qo‘lda to‘ldiring.' });
+          if (aiErrorStatuses.has(completed.ai_status)) notice.warning({ message: aiFailureMessage(completed.ai_status) });
           else if (completed.ai_status === 'NO_FIELDS') notice.info({ message: 'Hujjatdan maydon topilmadi.' });
           else if (completed.ai_status === 'COMPLETED') notice.success({ message: 'Hujjat tahlili yakunlandi.' });
         })
@@ -252,14 +277,14 @@ function PublicIntake() {
         ? `Hujjat yuklandi. ${filled.length} ta maydon to’ldirildi.`
         : result.data.ai_status === 'CONSENT_REQUIRED'
           ? 'Hujjat saqlandi. Avtomatik to’ldirish uchun AI roziligini belgilang.'
-          : savedFile.ai_status === 'FAILED'
-            ? 'Hujjat saqlandi. AI tahlili bajarilmadi; qayta urinib ko’ring.'
+          : aiErrorStatuses.has(savedFile.ai_status)
+            ? `Hujjat saqlandi. ${aiFailureMessage(savedFile.ai_status)}`
           : savedFile.ai_status === 'PROCESSING'
               ? 'Hujjat saqlandi. AI tahlili fon rejimida davom etmoqda.'
               : savedFile.ai_status === 'NO_FIELDS'
                 ? 'Hujjat saqlandi, ammo undan maydon topilmadi.'
                 : 'Hujjat xavfsiz saqlandi.';
-      if (savedFile.ai_status === 'FAILED') notice.warning({ message });
+      if (aiErrorStatuses.has(savedFile.ai_status)) notice.warning({ message });
       else notice.success({ message, description: filled.length ? 'Ma’lumotlarni hujjat bilan solishtirib tekshiring.' : undefined });
     } catch (error) { notice.error({ message: uploaded ? 'Hujjat saqlandi, lekin AI natijasini olishda xatolik yuz berdi' : 'Fayl yuklanmadi', description: errorMessage(error) }); }
     finally { setProgress((current) => { const nextValue = { ...current }; delete nextValue[key]; return nextValue; }); }
@@ -290,7 +315,7 @@ function PublicIntake() {
 
   const fileButtons = (requestedOnly: boolean, includePhoto = true, documentTypes = campaign.document_types) => <div className="public-upload-list">
     {includePhoto && (!requestedOnly || isFileRequested('photo')) && <section className="public-upload-item"><div><strong>Yashovchi surati</strong><small>Kamera bilan oling yoki rasm yuklang.</small></div><label className="upload-control"><input type="file" accept="image/jpeg,image/png,image/webp" capture="user" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'PHOTO'); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'PHOTO') ? 'Suratni almashtirish' : 'Surat tanlash'}</span></label>{progress.PHOTO !== undefined && <Progress percent={progress.PHOTO} size="small"/>}{files.filter((item) => item.kind === 'PHOTO').map((item) => <Tag key={item.id} color="green">{item.original_name}</Tag>)}</section>}
-    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <div className="public-file-result" key={item.id}><Tag color="green">{item.original_name}</Tag><Tag color={item.ai_status === 'FAILED' ? 'red' : item.ai_status === 'COMPLETED' ? 'green' : 'default'}>{aiStatusLabels[item.ai_status] || item.ai_status}</Tag>{item.ai_status === 'PROCESSING' && <small>Hujjat tekshirilmoqda. Maydonlar tayyor bo‘lganda avtomatik kiritiladi.</small>}{item.ai_status === 'FAILED' && <Button size="small" loading={retryingFileIds.includes(item.id)} onClick={() => void retryAI(item)}>AI tahlilini qayta urinish</Button>}</div>)}</section>)}
+    {documentTypes.filter((documentType) => !requestedOnly || isFileRequested(`document:${documentType}`)).map((documentType) => <section className="public-upload-item" key={documentType}><div><strong>{documentType === 'ID' ? 'Pasport yoki ID karta' : documentType === 'STUDY_PROOF' ? 'O‘qish joyidan ma’lumotnoma' : documentType}</strong><small>PDF, JPEG, PNG yoki WebP.</small></div><label className="upload-control"><input type="file" accept="application/pdf,image/jpeg,image/png,image/webp" capture="environment" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file, 'DOCUMENT', documentType); event.currentTarget.value = ''; }}/><span>{files.some((item) => item.kind === 'DOCUMENT' && item.document_type === documentType) ? 'Hujjatni almashtirish' : 'Hujjat tanlash'}</span></label>{progress[documentType] !== undefined && <Progress percent={progress[documentType]} size="small"/>}{files.filter((item) => item.kind === 'DOCUMENT' && item.document_type === documentType).map((item) => <div className="public-file-result" key={item.id}><Tag color="green">{item.original_name}</Tag><Tag color={aiErrorStatuses.has(item.ai_status) ? 'red' : item.ai_status === 'COMPLETED' ? 'green' : 'default'}>{aiStatusLabels[item.ai_status] || item.ai_status}</Tag>{item.ai_status === 'PROCESSING' && <small>Hujjat tekshirilmoqda. Maydonlar tayyor bo‘lganda avtomatik kiritiladi.</small>}{aiRetryableStatuses.has(item.ai_status) && <Button size="small" loading={retryingFileIds.includes(item.id)} onClick={() => void retryAI(item)}>AI tahlilini qayta urinish</Button>}</div>)}</section>)}
   </div>;
 
 
@@ -467,7 +492,7 @@ function StaffAdmissions() {
   const fileColumns = [
     {title:'Fayl',dataIndex:'original_name',render:(value:string,file:ApplicationFile)=><div><strong>{value}</strong><div><Text type="secondary">{file.kind==='PHOTO'?'Surat':file.document_type} · {Math.ceil(file.size_bytes/1024)} KB</Text></div></div>},
     {title:'Virus tekshiruvi',dataIndex:'scan_status',render:(value:string)=><Tag>{value==='NOT_CONFIGURED'?'Tekshirilmagan':value}</Tag>},
-    {title:'AI taklifi',dataIndex:'ai_status',render:(value:string,file:ApplicationFile)=><div><Tag color={value==='COMPLETED'?'green':value==='FAILED'?'red':'default'}>{aiStatusLabels[value]||value}</Tag>{Object.keys(file.extracted_data||{}).length>0&&<details className="ai-result"><summary>{Object.keys(file.extracted_data||{}).length} ta maydon</summary>{Object.entries(file.extracted_data||{}).map(([key,item])=><div key={key}><strong>{dataLabels[key]||key}: </strong>{item}</div>)}<Text type="secondary">Topilgan qiymatlarni asl hujjat bilan solishtiring.</Text></details>}</div>},
+    {title:'AI taklifi',dataIndex:'ai_status',render:(value:string,file:ApplicationFile)=><div><Tag color={value==='COMPLETED'?'green':aiErrorStatuses.has(value)?'red':'default'}>{aiStatusLabels[value]||value}</Tag>{Object.keys(file.extracted_data||{}).length>0&&<details className="ai-result"><summary>{Object.keys(file.extracted_data||{}).length} ta maydon</summary>{Object.entries(file.extracted_data||{}).map(([key,item])=><div key={key}><strong>{dataLabels[key]||key}: </strong>{item}</div>)}<Text type="secondary">Topilgan qiymatlarni asl hujjat bilan solishtiring.</Text></details>}</div>},
     {title:'',align:'right' as const,render:(_:unknown,file:ApplicationFile)=><Button icon={<DownloadOutlined/>} onClick={()=>void download(file)}>Himoyalangan ko‘rish</Button>},
   ];
   const dormitoryColumns = [

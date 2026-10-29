@@ -66,8 +66,10 @@ See `.env.example` for the supported variables. Important settings:
 | `CORS_ORIGINS` | Comma-separated trusted browser origins |
 | `PUBLIC_APP_URL` | Public frontend origin used for invitation links; defaults to `https://dormflows.netlify.app` and ignores stale localhost values |
 | `FILE_STORAGE_BACKEND`, `S3_*`, `FILE_RETENTION_DAYS` | Private file storage backend and retention period (365 days by default) |
-| `OCR_ENABLED`, `OCR_BINARY`, `OCR_LANGUAGES` | Local OCR switch, Tesseract executable, and language models (Uzbek Latin/Cyrillic, English, Russian by default) |
-| `OCR_MAX_PAGES`, `OCR_PAGE_TIMEOUT_SECONDS`, `OCR_MAX_PIXELS` | Limits OCR workload for uploaded PDFs and images |
+| `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_ENABLED` | Server-side OpenRouter credentials, model, and AI document-extraction switch |
+| `OPENROUTER_REQUIRE_ZDR` | Requires Zero Data Retention endpoints; requests also set `data_collection=deny` |
+
+AI document extraction requires an OpenRouter account tier that supports provider data-policy routing and a vision model/provider that satisfies both privacy controls. OpenRouter currently does not offer data-policy routing on its Free plan; see [OpenRouter pricing](https://openrouter.ai/pricing/) and [ZDR/data collection controls](https://openrouter.ai/docs/guides/get-started/sovereign-ai). The app intentionally does not disable these controls when a request fails. If the account, model, or provider cannot satisfy them, the saved file remains available for manual form entry and `ai_status` reports a safe error category.
 
 The billing convention uses `[start_date, end_date)`: a cycle includes its start date and ends immediately before its end date. The following cycle starts on the preceding cycle's end date. Period extensions update the open cycle and create an immutable billing-change record; they never create a payment. Actual payment records are append-only. Operators correct them by adding a signed adjustment with a reason.
 
@@ -86,7 +88,7 @@ The **Statistika** tab in **Qabul va arizalar** shows application counts, open c
 
 Applicants open the invitation at `/apply`. The link secret is carried in the URL fragment and removed before the page exchanges it for a short-lived, HTTP-only session. After the first submission, the applicant receives a one-time access code for later status checks and clarification requests. Only a hash of that code is stored. Staff can issue a replacement after manually checking identity.
 
-Development uses the private `private-files/` directory. Production uses a private PostgreSQL blob table by default, so uploads work without a separate S3 account and survive API restarts. Set `FILE_STORAGE_BACKEND=s3` with a private S3-compatible bucket and credentials when a separate object store is available. `FILE_RETENTION_DAYS` defaults to 365 days and should be set to the organization's approved period. Database backups also contain uploaded documents; keep them private and encrypted. The backend Docker image includes local Tesseract OCR with Uzbek Latin/Cyrillic, English, and Russian models. It extracts text from documents for staff review only; OCR text is never returned by public endpoints, never approves an application, and is cleared when the source file is deleted or purged. OCR work is bounded by page, time, and pixel limits. Face recognition is not used. Antivirus scanning is still not connected, so the admissions screen reports that honestly and staff must inspect the original file.
+Development uses the private `private-files/` directory. Production uses a private PostgreSQL blob table by default, so uploads work without a separate S3 account and survive API restarts. Set `FILE_STORAGE_BACKEND=s3` with a private S3-compatible bucket and credentials when a separate object store is available. `FILE_RETENTION_DAYS` defaults to 365 days and should be set to the organization's approved period. Database backups also contain uploaded documents; keep them private and encrypted. After an applicant explicitly agrees, document images are sent from the backend to OpenRouter for field suggestions; the file is saved first and analyzed in the background. Only validated fields are returned, and the applicant checks them manually. AI does not approve an application or recognize faces. Provider errors are reduced to safe status categories; secrets, raw provider responses, and document contents are not logged. OpenRouter must support the configured ZDR and `data_collection=deny` policies (see Configuration). Antivirus scanning is not connected, so the admissions screen reports that honestly and staff must inspect the original file.
 
 Files scheduled for deletion are purged in bounded batches. The Railway IaC declares a daily cleanup job at 05:30 Tashkent time; other hosting platforms need an equivalent scheduler:
 
@@ -118,7 +120,7 @@ From `backend/`, run:
 ..\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, OCR privacy and file cleanup, private file access, arbitrary billing periods, payment allocation, extensions, idempotent requests, expense voiding, export safety, and financial corrections. The release database remains PostgreSQL.
+The tests use isolated in-memory SQLite and cover role restrictions, room capacity and dated assignments, admission invitations and review, consent-gated AI status/error handling and file cleanup, private file access, arbitrary billing periods, payment allocation, extensions, idempotent requests, expense voiding, export safety, and financial corrections. The release database remains PostgreSQL.
 
 ## Production deployment
 

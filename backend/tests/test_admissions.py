@@ -234,6 +234,20 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     assert database.scalar(select(func.count(BillingPeriod.id)).where(BillingPeriod.resident_id == resident.id)) == 1
 
 
+def test_openrouter_failure_status_mapping_is_actionable_and_safe():
+    from types import SimpleNamespace
+
+    from app.ai_extraction import _provider_failure_status
+
+    assert _provider_failure_status(SimpleNamespace(status_code=401)) == "PROVIDER_CONFIG_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=402)) == "PROVIDER_CONFIG_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=404)) == "PROVIDER_CONFIG_ERROR"
+    assert _provider_failure_status(SimpleNamespace(status_code=429)) == "PROVIDER_RATE_LIMITED"
+    assert _provider_failure_status(SimpleNamespace(status_code=400)) == "PROVIDER_REJECTED"
+    assert _provider_failure_status(SimpleNamespace(status_code=503)) == "PROVIDER_UNAVAILABLE"
+    assert _provider_failure_status(SimpleNamespace()) == "FAILED"
+
+
 def test_openrouter_suggestions_require_consent_and_are_private(client, database, operator_token, admin_token, tmp_path, monkeypatch):
     import json
 
