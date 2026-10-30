@@ -19,7 +19,7 @@ def test_only_operator_can_adjust_historical_payments(client, operator_token, ad
         "first_name": "A", "last_name": "Resident", "payment_period_days": 30, "agreed_price": "500000",
         "billing_start": tday(),
     }).json()
-    payment = client.post("/api/payments", headers=headers, json={
+    payment = client.post("/api/payments", headers={**headers, "Idempotency-Key": "permissions-pay-01"}, json={
         "resident_id": person["id"], "amount": "100000", "payment_date": tday(), "method": "CASH",
     }).json()
     admin_headers = {"Authorization": f"Bearer {admin_token}"}

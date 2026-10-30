@@ -671,7 +671,8 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
         raise HTTPException(status_code=404, detail="Ariza topilmadi.")
     if application.status == "APPROVED" and application.resident_id:
         return get_application(application_id, db, user)
-    if application.status not in {"SUBMITTED", "IN_REVIEW", "NEEDS_INFO"}:
+    repairing_approved_application = application.status == "APPROVED"
+    if application.status not in {"SUBMITTED", "IN_REVIEW", "NEEDS_INFO"} and not repairing_approved_application:
         raise HTTPException(status_code=409, detail="Ushbu arizani tasdiqlab bo‘lmaydi.")
     room = db.get(Room, payload.room_id)
     if not room or room.dormitory_id != application.dormitory_id:
@@ -679,6 +680,7 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
     resident = db.get(Resident, payload.resident_id) if payload.resident_id else None
     if payload.resident_id and not resident:
         raise HTTPException(status_code=404, detail="Bog'lanadigan yashovchi topilmadi.")
+    previous_departed_on = resident.departed_on if resident else None
     latest_billing_period = db.scalar(
         select(BillingPeriod)
         .where(BillingPeriod.resident_id == resident.id)
@@ -714,6 +716,8 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
     if resident and resident.is_archived:
         resident.is_archived = False
         resident.archived_at = None
+    if resident and resident.departed_on is not None:
+        resident.departed_on = None
     if not resident:
         resident = Resident(
             first_name=application.first_name_latin.strip(),
@@ -753,7 +757,8 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
     application.approved_move_out = payload.move_out
     application.review_reason = payload.reason.strip()
     application.assigned_to = user.id
-    application.terminal_at = utcnow()
+    if not repairing_approved_application or application.terminal_at is None:
+        application.terminal_at = utcnow()
     retention = settings.file_retention_days
     if retention:
         attachments = db.scalars(select(ApplicationFile).where(
@@ -762,8 +767,20 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
         )).all()
         for attachment in attachments:
             attachment.delete_after = application.terminal_at + timedelta(days=retention)
-    _event(db, application, "APPROVED", user, payload.reason.strip())
-    audit(db, user, "APPLICATION_APPROVED", "StudentApplication", application.id, {"resident_id": str(resident.id), "room_id": str(room.id)})
+    if repairing_approved_application:
+        audit(db, user, "APPLICATION_RESIDENT_LINKED", "StudentApplication", application.id, {
+            "resident_id": str(resident.id),
+            "room_id": str(room.id),
+            "previous_departed_on": previous_departed_on.isoformat() if previous_departed_on else None,
+            "repair_of_approved_application": True,
+        })
+    else:
+        _event(db, application, "APPROVED", user, payload.reason.strip())
+        audit(db, user, "APPLICATION_APPROVED", "StudentApplication", application.id, {
+            "resident_id": str(resident.id),
+            "room_id": str(room.id),
+            "previous_departed_on": previous_departed_on.isoformat() if previous_departed_on else None,
+        })
     try:
         db.commit()
     except IntegrityError:

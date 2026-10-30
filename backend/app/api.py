@@ -624,9 +624,11 @@ def list_payments(
 @router.post("/payments", response_model=PaymentOut, status_code=201)
 def create_payment(
     payload: PaymentCreate,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128, description="Majburiy: takroriy to‘lov yozuvlarini oldini oladi."),
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> PaymentOut:
+    if idempotency_key is None:
+        raise HTTPException(status_code=422, detail="To‘lovni qayd etish uchun Idempotency-Key sarlavhasi majburiy.")
     if idempotency_key is not None and (len(idempotency_key) < 8 or any(not (c.isalnum() or c in "._:-") for c in idempotency_key)):
         raise HTTPException(status_code=422, detail="Idempotency-Key kamida 8 ta xavfsiz belgidan iborat bo'lishi kerak.")
     if idempotency_key:
@@ -692,7 +694,7 @@ def create_payment(
         db.rollback()
         if idempotency_key:
             previous = db.scalar(select(Payment).options(joinedload(Payment.resident)).where(Payment.recorded_by == actor.id, Payment.idempotency_key == idempotency_key))
-            if previous and previous.resident_id == payload.resident_id and previous.amount == payload.amount and previous.payment_date == payload.payment_date and previous.method == payload.method and previous.notes == payload.notes.strip():
+            if previous and previous.resident_id == payload.resident_id and previous.amount == payload.amount and previous.payment_date == payload.payment_date and previous.method == payload.method and previous.notes == payload.notes.strip() and (payload.billing_period_id is None or previous.billing_period_id == payload.billing_period_id):
                 return payment_out(db, previous)
         raise HTTPException(status_code=409, detail="To'lov qayta yuborilgan yoki davr qoldig'i o'zgargan. Ma'lumotni yangilang.") from None
     db.refresh(payment)
@@ -722,9 +724,11 @@ def list_expenses(
 @router.post("/expenses", response_model=ExpenseOut, status_code=201)
 def create_expense(
     payload: ExpenseCreate,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128, description="Majburiy: takroriy xarajat yozuvlarini oldini oladi."),
     db: Session = Depends(get_db), actor: User = Depends(get_current_user),
 ) -> ExpenseOut:
+    if idempotency_key is None:
+        raise HTTPException(status_code=422, detail="Xarajatni qayd etish uchun Idempotency-Key sarlavhasi majburiy.")
     if idempotency_key is not None and (len(idempotency_key) < 8 or any(not (c.isalnum() or c in "._:-") for c in idempotency_key)):
         raise HTTPException(status_code=422, detail="Idempotency-Key kamida 8 ta xavfsiz belgidan iborat bo'lishi kerak.")
     if idempotency_key:

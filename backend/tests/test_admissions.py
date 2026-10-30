@@ -1,5 +1,5 @@
 import io
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -161,7 +161,7 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
     assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("0.00")
 
     today = datetime.now(ZoneInfo("Asia/Tashkent")).date()
-    recorded_payment = client.post("/api/payments", headers=admin, json={
+    recorded_payment = client.post("/api/payments", headers={**admin, "Idempotency-Key": "admission-payment-01"}, json={
         "resident_id": str(resident.id), "amount": "100000", "payment_date": today.isoformat(), "method": "CASH",
     })
     assert recorded_payment.status_code == 201, recorded_payment.text
@@ -169,7 +169,7 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
     assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("100000.00")
     assert Decimal(summary.json()["outstanding_debt"]) == Decimal("200000.00")
 
-    expense = client.post("/api/expenses", headers=admin, json={
+    expense = client.post("/api/expenses", headers={**admin, "Idempotency-Key": "admission-expense-01"}, json={
         "expense_date": today.isoformat(), "category": "UTILITIES", "description": "Test utility cost",
         "amount": "25000", "method": "CASH", "reference": "",
     })
@@ -209,6 +209,10 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
         "billing_start": "2026-11-01", "billing_end": "2026-12-01",
     })
     assert existing.status_code == 201, existing.text
+    existing_resident = database.get(Resident, UUID(existing.json()["id"]))
+    assert existing_resident is not None
+    existing_resident.departed_on = date(2026, 10, 20)
+    database.commit()
 
     _fill_application(client, public_session)
     submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
@@ -229,9 +233,72 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     assert approved.json()["resident_id"] == existing.json()["id"]
     resident = database.get(Resident, UUID(existing.json()["id"]))
     assert resident is not None and resident.room_id == UUID(room.json()["id"])
+    assert resident.departed_on is None
     assert resident.agreed_price == 400000
     assert database.scalar(select(func.count(Resident.id))) == 1
     assert database.scalar(select(func.count(BillingPeriod.id)).where(BillingPeriod.resident_id == resident.id)) == 1
+    approval_audit = database.scalar(select(AuditEvent).where(
+        AuditEvent.action == "APPLICATION_APPROVED",
+        AuditEvent.entity_id == application.id,
+    ))
+    assert approval_audit is not None
+    assert approval_audit.details["previous_departed_on"] == "2026-10-20"
+    resident_list = client.get("/api/residents", headers=admin, params={"departed": "active"})
+    assert resident_list.status_code == 200, resident_list.text
+    assert resident_list.json()["total"] == 1
+
+
+def test_approved_application_without_resident_can_be_repaired(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+    dormitory, _, _, _, public_session = _workflow(client, operator_token, admin_token)
+    _fill_application(client, public_session)
+    submitted = client.post(
+        "/api/public/application/submit",
+        headers={"X-CSRF-Token": public_session["csrf_token"]},
+        json={"consent": True},
+    )
+    assert submitted.status_code == 200, submitted.text
+    application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
+    assert application is not None
+
+    # Model a legacy or manually unlinked approved record.
+    application.status = "APPROVED"
+    application.terminal_at = datetime.now(UTC)
+    original_terminal_at = application.terminal_at
+    database.commit()
+    room = client.post("/api/rooms", headers=_headers(admin_token), json={
+        "number": "404", "dormitory_id": dormitory["id"], "floor": 4, "capacity": 1, "price": "300000",
+    })
+    assert room.status_code == 201, room.text
+
+    repaired = client.post(f"/api/admissions/applications/{application.id}/approve", headers=_headers(admin_token), json={
+        "reason": "Resident profile link restored.", "room_id": room.json()["id"], "move_in": "2026-11-01",
+    })
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["status"] == "APPROVED"
+    assert repaired.json()["resident_id"]
+    assert application.terminal_at == original_terminal_at
+    assert database.scalar(select(func.count(Resident.id))) == 1
+    assert database.scalar(select(func.count(ResidencePeriod.id))) == 1
+    assert database.scalar(select(func.count(BillingPeriod.id))) == 1
+    assert database.scalar(select(func.count(ApplicationStatusEvent.id)).where(
+        ApplicationStatusEvent.application_id == application.id,
+        ApplicationStatusEvent.to_status == "APPROVED",
+    )) == 0
+    assert database.scalar(select(func.count(AuditEvent.id)).where(
+        AuditEvent.action == "APPLICATION_RESIDENT_LINKED",
+        AuditEvent.entity_id == application.id,
+    )) == 1
+    retry = client.post(f"/api/admissions/applications/{application.id}/approve", headers=_headers(admin_token), json={
+        "reason": "Retry the recovered request.", "room_id": room.json()["id"], "move_in": "2026-11-01",
+    })
+    assert retry.status_code == 200, retry.text
+    assert database.scalar(select(func.count(Resident.id))) == 1
+    assert database.scalar(select(func.count(ResidencePeriod.id))) == 1
+    assert database.scalar(select(func.count(BillingPeriod.id))) == 1
+    resident_list = client.get("/api/residents", headers=_headers(admin_token), params={"departed": "active"})
+    assert resident_list.status_code == 200, resident_list.text
+    assert resident_list.json()["total"] == 1
 
 
 def test_openrouter_failure_status_mapping_is_actionable_and_safe():

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 
-from app.models import BillingPeriod
+from app.models import BillingPeriod, Expense, Payment
 from app.scheduled_jobs import run_daily_jobs
 
 
@@ -28,6 +28,33 @@ def test_payment_retries_return_the_original_receipt_without_double_counting(cli
 
     conflict = client.post("/api/payments", headers=request_headers, json={**payload, "amount": "200000"})
     assert conflict.status_code == 409
+    different_period = client.post("/api/payments", headers=request_headers, json={
+        **payload, "billing_period_id": str(UUID(int=0)),
+    })
+    assert different_period.status_code == 409
+
+
+def test_financial_writes_require_idempotency_keys(client, database, operator_token):
+    headers = {"Authorization": f"Bearer {operator_token}"}
+    today = datetime.now(ZoneInfo("Asia/Tashkent")).date()
+    resident = client.post("/api/residents", headers=headers, json={
+        "first_name": "Sardor", "last_name": "Aliyev", "payment_period_days": 30,
+        "agreed_price": "500000", "billing_start": today.isoformat(),
+        "billing_end": (today + timedelta(days=30)).isoformat(),
+    }).json()
+    payment = client.post("/api/payments", headers=headers, json={
+        "resident_id": resident["id"], "amount": "100000", "payment_date": today.isoformat(), "method": "CASH",
+    })
+    expense = client.post("/api/expenses", headers=headers, json={
+        "expense_date": today.isoformat(), "category": "OTHER", "description": "Mayda xarid",
+        "amount": "10000", "method": "CASH",
+    })
+    assert payment.status_code == 422
+    assert "Idempotency-Key" in payment.json()["detail"]
+    assert expense.status_code == 422
+    assert "Idempotency-Key" in expense.json()["detail"]
+    assert database.query(Payment).count() == 0
+    assert database.query(Expense).count() == 0
 
 
 def test_get_requests_do_not_create_billing_periods_but_daily_job_does(client, database, operator_token):

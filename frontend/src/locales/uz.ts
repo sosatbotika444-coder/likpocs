@@ -56,9 +56,10 @@ export const uz = {
       BILLING_CYCLE_CREATED: 'To‘lov davri yaratildi', BILLING_PERIOD_CREATED: 'To‘lov jadvali sozlandi',
       BILLING_SCHEDULE_CHANGED: 'To‘lov jadvali o‘zgartirildi', BILLING_PRICE_CHANGED: 'Kelishilgan narx o\u2018zgartirildi', BILLING_EXTENDED: 'Yashash muddati uzaytirildi',
       PAYMENT_RECORDED: 'To‘lov qayd etildi', EXPENSE_RECORDED: 'Xarajat qayd etildi', EXPENSE_VOIDED: 'Xarajat bekor qilindi', PAYMENT_ADJUSTED: 'To‘lovga tuzatish kiritildi',
+      APPLICATION_RESIDENT_LINKED: 'Yashovchi qabul arizasiga bog‘landi',
       SETTINGS_UPDATED: 'Sozlamalar yangilandi',
     },
-    entity: { User: 'Foydalanuvchi', Room: 'Xona', Resident: 'Yashovchi', BillingPeriod: 'To‘lov davri', Payment: 'To‘lov', SystemSetting: 'Tizim sozlamasi', Expense: 'Xarajat' },
+    entity: { User: 'Foydalanuvchi', Room: 'Xona', Resident: 'Yashovchi', StudentApplication: 'Qabul arizasi', BillingPeriod: 'To‘lov davri', Payment: 'To‘lov', SystemSetting: 'Tizim sozlamasi', Expense: 'Xarajat' },
     fields: {
       name: 'Ism-familiya', email: 'Elektron pochta', role: 'Rol', changed_fields: 'O‘zgargan maydonlar',
       number: 'Xona raqami', resident_id: 'Yashovchi raqami', amount: 'Summa', amount_delta: 'Tuzatish summasi',
@@ -67,6 +68,7 @@ export const uz = {
       first_name: 'Ism', last_name: 'Familiya', phone: 'Telefon', telegram_username: 'Telegram nomi',
       room_id: 'Xona raqami', check_in_date: 'Ko‘chib kirgan sana', billing_start: 'Davr boshlanishi',
       billing_end: 'Davr tugashi', payment_period_days: 'To‘lov davri', agreed_price: 'Kelishilgan narx', notes: 'Izoh',
+      previous_departed_on: 'Avvalgi chiqish sanasi', repair_of_approved_application: 'Tasdiqlangan arizaga qayta bog‘landi',
     },
   },
 } as const;

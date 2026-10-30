@@ -18,7 +18,7 @@ def test_report_formats_return_exports_with_uzbek_headers(client, operator_token
         "first_name": "Malika", "last_name": "Saidova", "payment_period_days": 21,
         "agreed_price": "350000", "billing_start": today.isoformat(),
     }).json()
-    client.post("/api/payments", headers=headers, json={
+    client.post("/api/payments", headers={**headers, "Idempotency-Key": "report-payment-01"}, json={
         "resident_id": person["id"], "amount": "50000", "payment_date": today.isoformat(), "method": "CASH",
     })
 

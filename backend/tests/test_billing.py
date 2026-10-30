@@ -7,6 +7,10 @@ def tday():
     return datetime.now(ZoneInfo("Asia/Tashkent")).date()
 
 
+def payment_headers(token, key):
+    return {"Authorization": f"Bearer {token}", "Idempotency-Key": key}
+
+
 def room(client, token, capacity=2):
     response = client.post("/api/rooms", headers={"Authorization": f"Bearer {token}"}, json={"number": "101", "capacity": capacity, "floor": 1})
     assert response.status_code == 201, response.text
@@ -30,14 +34,14 @@ def test_arbitrary_period_partial_payment_then_full_payment_stays_paid_until_due
     assert person["balance"] == "600000.00"
     assert person["billing_status"] == "CURRENT"
 
-    partial = client.post("/api/payments", headers={"Authorization": f"Bearer {operator_token}"}, json={
+    partial = client.post("/api/payments", headers=payment_headers(operator_token, "billing-partial-0001"), json={
         "resident_id": person["id"], "amount": "150000", "payment_date": tday().isoformat(), "method": "CASH",
     })
     assert partial.status_code == 201, partial.text
     after_partial = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
     assert after_partial["balance"] == "450000.00"
 
-    remainder = client.post("/api/payments", headers={"Authorization": f"Bearer {operator_token}"}, json={
+    remainder = client.post("/api/payments", headers=payment_headers(operator_token, "billing-remainder-001"), json={
         "resident_id": person["id"], "amount": "450000", "payment_date": tday().isoformat(), "method": "CLICK",
     })
     assert remainder.status_code == 201, remainder.text
@@ -50,7 +54,7 @@ def test_arbitrary_period_partial_payment_then_full_payment_stays_paid_until_due
 
 def test_payment_without_a_valid_billing_period_is_rejected(client, operator_token):
     person = resident(client, operator_token, billing=False)
-    response = client.post("/api/payments", headers={"Authorization": f"Bearer {operator_token}"}, json={
+    response = client.post("/api/payments", headers=payment_headers(operator_token, "billing-no-period-01"), json={
         "resident_id": person["id"], "amount": "1000", "payment_date": tday().isoformat(), "method": "CASH",
     })
     assert response.status_code == 409
@@ -81,7 +85,7 @@ def test_explicit_end_date_applies_to_the_current_cycle_and_period_days_roll_for
     assert person["billing_end"] == explicit_end.isoformat()
     details = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
     assert details["billing_history"][0]["period_days"] == 9
-    payment = client.post("/api/payments", headers={"Authorization": f"Bearer {operator_token}"}, json={
+    payment = client.post("/api/payments", headers=payment_headers(operator_token, "billing-explicit-001"), json={
         "resident_id": person["id"], "amount": "180000", "payment_date": tday().isoformat(), "method": "CASH",
     })
     assert payment.status_code == 201, payment.text
@@ -93,7 +97,7 @@ def test_explicit_end_date_applies_to_the_current_cycle_and_period_days_roll_for
 
 def test_overpayment_cannot_be_silently_applied(client, operator_token):
     person = resident(client, operator_token)
-    response = client.post("/api/payments", headers={"Authorization": f"Bearer {operator_token}"}, json={
+    response = client.post("/api/payments", headers=payment_headers(operator_token, "billing-overpay-001"), json={
         "resident_id": person["id"], "amount": "600001", "payment_date": tday().isoformat(), "method": "CASH",
     })
     assert response.status_code == 422
