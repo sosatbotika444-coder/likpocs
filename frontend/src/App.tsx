@@ -1,14 +1,16 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { Avatar, Badge, Button, Dropdown, Layout, Menu, Spin, Typography, Grid, Drawer, notification } from 'antd';
+import { Avatar, Badge, Button, Dropdown, Layout, Menu, Spin, Tooltip, Typography, Grid, Drawer, notification } from 'antd';
 import {
-  AppstoreOutlined, BellOutlined, FileExcelOutlined,
+  AppstoreOutlined, BellOutlined, FileExcelOutlined, CheckSquareOutlined, PlusOutlined, SearchOutlined,
   HomeOutlined, LogoutOutlined, MenuOutlined, SettingOutlined, TeamOutlined, UserOutlined, SolutionOutlined,
-  WalletOutlined, DollarCircleOutlined, AuditOutlined, QuestionCircleOutlined,
+  WalletOutlined, DollarCircleOutlined, AuditOutlined, QuestionCircleOutlined, SoundOutlined, MutedOutlined,
 } from '@ant-design/icons';
 import { api, errorMessage } from './api';
 import { useAuth } from './auth';
 import { uz, formatDate } from './locales/uz';
+import { CommandPalette, type PaletteCommand } from './CommandPalette';
+import { onSoundChange, playSound, setSoundEnabled, soundEnabled } from './sound';
 import type { Notification as AppNotification, Role } from './types';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -21,6 +23,8 @@ const SettingsPage = lazy(() => import('./pages/Settings'));
 const Landing = lazy(() => import('./pages/Landing'));
 const Admissions = lazy(() => import('./pages/Admissions'));
 const AdminGuide = lazy(() => import('./pages/AdminGuide'));
+const Tasks = lazy(() => import('./pages/Tasks'));
+const ALERT_POLL_MS = 60_000;
 const PublicApplication = lazy(async () => {
   const module = await import('./pages/Admissions');
   return { default: module.PublicApplication };
@@ -31,7 +35,7 @@ const { Text } = Typography;
 const routeTitles: Record<string, string> = {
   '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
   '/payments': uz.nav.payments, '/expenses': uz.nav.expenses, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
-  '/admissions': uz.nav.admissions, '/guide': 'Administrator uchun qo‘llanma',
+  '/admissions': uz.nav.admissions, '/tasks': uz.nav.tasks, '/guide': 'Administrator uchun qo‘llanma',
 };
 
 function Login() {
@@ -81,14 +85,39 @@ function Shell() {
   const current = routeTitles[location.pathname] || (location.pathname === '/settings/users' ? uz.nav.users : location.pathname === '/settings/audit' ? uz.nav.audit : uz.nav.dashboard);
   const initials = user?.full_name.split(/\s+/).slice(0, 2).map((item) => item[0]).join('').toLocaleUpperCase('uz-UZ') || 'RS';
 
-  const loadAlerts = async () => {
-    try { setAlerts((await api.get<AppNotification[]>('/notifications')).data); }
-    catch (error) { notice.error({ message: 'Bildirishnomalarni yuklab bo‘lmadi', description: errorMessage(error) }); }
-  };
-  useEffect(() => { void loadAlerts(); }, []);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sound, setSound] = useState(soundEnabled());
+  const knownAlerts = useRef<Set<string> | null>(null);
+
+  // GET-only polling: reads the signed-in user's unread notifications and chimes on new ones.
+  const loadAlerts = useCallback(async (silent = false) => {
+    try {
+      const items = (await api.get<AppNotification[]>('/notifications')).data;
+      const seen = knownAlerts.current;
+      if (seen && items.some((item) => !seen.has(item.id))) playSound('notify');
+      knownAlerts.current = new Set(items.map((item) => item.id));
+      setAlerts(items);
+    } catch (error) {
+      if (!silent) notice.error({ message: 'Bildirishnomalarni yuklab bo‘lmadi', description: errorMessage(error) });
+    }
+  }, [notice]);
+  useEffect(() => {
+    void loadAlerts();
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void loadAlerts(true); }, ALERT_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadAlerts]);
+  useEffect(() => onSoundChange(setSound), []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setPaletteOpen((value) => !value); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const menuItems = useMemo(() => [
     { key: '/app', icon: <AppstoreOutlined />, label: uz.nav.dashboard },
+    { key: '/tasks', icon: <CheckSquareOutlined />, label: uz.nav.tasks },
     { key: '/residents', icon: <TeamOutlined />, label: uz.nav.residents },
     { key: '/rooms', icon: <HomeOutlined />, label: uz.nav.rooms },
     { key: '/admissions', icon: <SolutionOutlined />, label: uz.nav.admissions },
@@ -114,8 +143,24 @@ function Shell() {
 
   const notificationMenu = {
     items: alerts.length ? alerts.slice(0, 12).map((item) => ({ key: item.id, label: <div className="notification-item"><strong>{item.title}</strong><span>{item.message}</span><small>{formatDate(item.created_at.slice(0, 10), true)}</small></div> })) : [{ key: 'empty', disabled: true, label: 'Yangi bildirishnoma yo‘q' }],
-    onClick: async () => { await api.post('/notifications/read-all'); await loadAlerts(); },
+    onClick: async ({ key }: { key: string }) => {
+      const target = alerts.find((item) => item.id === key);
+      if (target?.kind.startsWith('TASK')) navigate('/tasks');
+      else if (target?.entity_id && ['OVERDUE', 'DUE_TODAY', 'DUE_SOON'].includes(target.kind)) navigate(`/residents?resident_id=${target.entity_id}`);
+      await api.post('/notifications/read-all'); await loadAlerts();
+    },
   };
+
+  const paletteCommands = useMemo<PaletteCommand[]>(() => [
+    ...menuItems.flatMap((item): PaletteCommand[] => {
+      if (!item.key || !item.label) return [];
+      const path = item.key;
+      return [{ key: `nav:${path}`, label: item.label, icon: item.icon, group: uz.palette.navigate, run: () => { void navigate(path); } }];
+    }),
+    { key: 'action:task', label: uz.palette.newTask, icon: <PlusOutlined />, group: uz.palette.actions, keywords: 'vazifa task', run: () => { void navigate('/tasks?new=1'); } },
+    { key: 'action:sound', label: sound ? uz.palette.soundOff : uz.palette.soundOn, icon: sound ? <MutedOutlined /> : <SoundOutlined />, group: uz.palette.actions, keywords: 'ovoz sound', run: () => setSoundEnabled(!sound) },
+    { key: 'action:logout', label: uz.palette.logout, icon: <LogoutOutlined />, group: uz.palette.actions, keywords: 'chiqish logout', run: logout },
+  ], [menuItems, navigate, sound, logout]);
 
   return <Layout className={`app-layout${location.pathname === '/app' ? ' dashboard-app' : ''}`}>
     {contextHolder}
@@ -124,13 +169,17 @@ function Shell() {
       <Header className="app-header">
         {mobile && <Button type="text" icon={<MenuOutlined />} aria-label="Menyuni ochish" onClick={() => setDrawer(true)}/>}
         <div className="breadcrumb"><span>Asosiy</span><b>/</b><strong>{current}</strong></div>
-        <div className="header-actions"><Text className="header-date">{new Intl.DateTimeFormat('uz-UZ',{weekday:'short',day:'numeric',month:'short',timeZone:'Asia/Tashkent'}).format(new Date())}</Text>
+        <div className="header-actions">
+          <button type="button" className="palette-trigger" onClick={() => setPaletteOpen(true)} aria-label={uz.palette.open}><SearchOutlined /><span>{uz.palette.open}</span><kbd>{uz.palette.hint}</kbd></button>
+          <Tooltip title={sound ? uz.sound.on : uz.sound.off}><Button type="text" className="sound-trigger" aria-label={sound ? uz.palette.soundOff : uz.palette.soundOn} icon={sound ? <SoundOutlined /> : <MutedOutlined />} onClick={() => setSoundEnabled(!sound)} /></Tooltip>
+          <Text className="header-date">{new Intl.DateTimeFormat('uz-UZ',{weekday:'short',day:'numeric',month:'short',timeZone:'Asia/Tashkent'}).format(new Date())}</Text>
           <Dropdown menu={notificationMenu} trigger={['click']} placement="bottomRight"><Button type="text" className="notification-trigger" aria-label="Bildirishnomalar"><Badge dot={alerts.length > 0}><BellOutlined/></Badge></Button></Dropdown>
           <span className="header-divider"/><Dropdown menu={{items:[{key:'profile',label:'Hisob ma’lumotlari',icon:<UserOutlined/>,onClick:()=>navigate('/settings')},{key:'logout',label:'Tizimdan chiqish',icon:<LogoutOutlined/>,onClick:logout}]}} trigger={['click']}><Button type="text" className="profile-trigger"><Avatar size={30}>{initials}</Avatar><span className="profile-name">{user?.full_name}</span></Button></Dropdown>
         </div>
       </Header>
-      <Content className="app-content"><Outlet context={{ reloadAlerts: loadAlerts }} /></Content>
+      <Content className="app-content"><div className="page-transition" key={location.pathname}><Outlet context={{ reloadAlerts: loadAlerts }} /></div></Content>
     </Layout>
+    <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={paletteCommands} />
     <Drawer open={drawer} onClose={() => setDrawer(false)} placement="left" width={270} className="mobile-nav-drawer" closable={false}>{sidebar}</Drawer>
   </Layout>;
 }
@@ -164,6 +213,7 @@ export default function App() {
       <Route path="/residents" element={<Residents/>}/>
       <Route path="/rooms" element={<Rooms/>}/>
       <Route path="/admissions" element={<Admissions/>}/>
+      <Route path="/tasks" element={<Tasks/>}/>
       <Route path="/guide" element={<AdminGuide/>}/>
       <Route path="/payments" element={<Payments/>}/>
       <Route path="/expenses" element={<Expenses/>}/>

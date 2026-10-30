@@ -9,6 +9,7 @@ import 'antd/dist/reset.css';
 import './landing.css';
 import './styles.css';
 import './app-overrides.css';
+import './motion.css';
 import App from './App';
 import { AuthProvider } from './auth';
 

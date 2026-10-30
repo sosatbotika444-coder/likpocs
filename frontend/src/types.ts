@@ -37,6 +37,16 @@ export type Expense = {
 };
 
 export type Page<T> = { items: T[]; total: number; skip: number; limit: number };
+export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'DONE' | 'CANCELLED';
+export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+export type StaffTask = {
+  id: string; title: string; description: string; status: TaskStatus; priority: TaskPriority; due_date: string | null;
+  assignee_id: string | null; assignee_name: string | null; created_by: string; created_by_name: string;
+  room_id: string | null; room_number: string | null; resident_id: string | null; resident_name: string | null;
+  completed_at: string | null; created_at: string; updated_at: string; is_overdue: boolean; can_edit: boolean;
+};
+export type TaskSummary = { todo: number; in_progress: number; done: number; cancelled: number; overdue: number; mine_open: number };
+export type TaskAssignee = { id: string; full_name: string; role: Role };
 export type Dashboard = {
   residents: number; rooms: number; occupancy_rate: number; available_beds: number;
   due_today: number; due_soon: number; overdue: number; actual_revenue: number; actual_expenses: number; net_cash_flow: number;

@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api import router
 from app.admissions_api import public_router, staff_router
 from app.config import settings
+from app.tasks_api import router as tasks_router
 
 
 @asynccontextmanager
@@ -61,6 +62,7 @@ async def database_error(_: Request, __: SQLAlchemyError) -> JSONResponse:
 app.include_router(router)
 app.include_router(staff_router)
 app.include_router(public_router)
+app.include_router(tasks_router)
 
 
 @app.get("/", include_in_schema=False)

@@ -410,6 +410,31 @@ class ResidencePeriod(Base):
     resident: Mapped[Resident] = relationship(back_populates="residence_periods")
 
 
+class StaffTask(Base):
+    """Internal staff work item; cancelled instead of deleted to keep the board history traceable."""
+
+    __tablename__ = "staff_tasks"
+    __table_args__ = (
+        CheckConstraint("status IN ('TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED')", name="ck_staff_task_status"),
+        CheckConstraint("priority IN ('LOW', 'NORMAL', 'HIGH', 'URGENT')", name="ck_staff_task_priority"),
+        Index("ix_staff_task_status_due", "status", "due_date"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="TODO")
+    priority: Mapped[str] = mapped_column(String(12), default="NORMAL")
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    assignee_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    room_id: Mapped[UUID | None] = mapped_column(ForeignKey("rooms.id", ondelete="SET NULL"), nullable=True)
+    resident_id: Mapped[UUID | None] = mapped_column(ForeignKey("residents.id", ondelete="SET NULL"), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class PublicRateLimit(Base):
     __tablename__ = "public_rate_limits"
 

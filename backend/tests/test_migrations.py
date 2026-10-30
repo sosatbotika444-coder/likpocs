@@ -29,6 +29,7 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     file_blobs = load_revision(root / "alembic" / "versions" / "20261026_03_postgres_application_file_blobs.py")
     departures = load_revision(root / "alembic" / "versions" / "20261027_01_resident_departures.py")
     ai_extraction = load_revision(root / "alembic" / "versions" / "20261028_01_openrouter_document_extraction.py")
+    staff_tasks = load_revision(root / "alembic" / "versions" / "20261030_01_staff_tasks.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
     application_id, application_file_id = uuid4(), uuid4()
@@ -77,8 +78,10 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         departures.upgrade()
         ai_extraction.op = ops
         ai_extraction.upgrade()
+        staff_tasks.op = ops
+        staff_tasks.upgrade()
         inspector = inspect(connection)
-        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses"}
+        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses", "staff_tasks"}
         assert expected <= set(inspector.get_table_names())
         file_columns = {column["name"] for column in inspector.get_columns("application_files")}
         assert {"ai_status", "extracted_data"} <= file_columns
@@ -97,6 +100,8 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        staff_tasks.downgrade()
+        assert "staff_tasks" not in set(inspect(connection).get_table_names())
         ai_extraction.downgrade()
         departures.downgrade()
         file_blobs.downgrade()

@@ -107,6 +107,20 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 
 Имена обработчиков из таблицы, сгруппированные по ресурсу: health; login, refresh, me; list_users, create_user, update_user; list_rooms, create_room, update_room, archive_room; list_residents, create_resident, get_resident, update_resident, archive_resident, checkout_resident, restore_resident, extend_resident, resident_payments; list_payments, create_payment, adjust_payment, list_adjustments; list_expenses, create_expense, void_expense; dashboard; list_notifications, mark_notifications_read; get_settings, update_settings; list_audit; export_report. Все эти функции находятся в backend/app/api.py.
 
+### Доска задач персонала — backend/app/tasks_api.py
+
+Все пути имеют префикс /api; router подключается в backend/app/main.py. Авторизация проверяется на сервере: просматривать доску и создавать задачи может любой активный сотрудник; OPERATOR назначает задачи кому угодно и редактирует любые; ADMIN назначает задачи только себе (или оставляет без исполнителя) и редактирует только свои или назначенные ему задачи. Жёсткого удаления нет (DELETE не существует, отвечает 405): задача переводится в `CANCELLED`. Каждая запись аудируется (`TASK_CREATED`, `TASK_UPDATED` со старыми и новыми значениями изменённых полей).
+
+| Метод и путь | Доступ | Назначение |
+| --- | --- | --- |
+| GET /tasks | Персонал | Список задач с фильтрами `scope` (all/mine/created), `priority`, `q`, `include_cancelled`; сортировка по приоритету и сроку; поле `can_edit` вычисляется для текущего пользователя. |
+| GET /tasks/summary | Персонал | Количество задач по статусам, просроченных открытых задач и открытых задач текущего пользователя. |
+| GET /tasks/assignees | Персонал | Активные сотрудники для выбора исполнителя: только id, имя и роль, без email. ADMIN получает только себя. |
+| POST /tasks | Персонал | Создать задачу в статусе TODO. Назначение другому человеку разрешено только OPERATOR (иначе 403); проверяются ссылки на комнату и жителя. Исполнитель (если это не автор) получает личное уведомление `TASK`. |
+| PATCH /tasks/{task_id} | Автор, исполнитель или Оператор | Изменить поля и статус; блокировка строки `with_for_update`. При DONE заполняется `completed_at`, при выходе из DONE очищается. Новому исполнителю отправляется `TASK`, автору при выполнении задачи другим человеком — `TASK_DONE`. |
+
+Функции: list_tasks, task_summary, task_assignees, create_task, update_task; вспомогательные _can_edit, _check_assignee, _check_links, task_out, _audit_value. Константы: PRIORITY_RANK, OPEN_STATUSES, PRIORITY_UZ. Задачи не являются финансовыми записями и не влияют на биллинг.
+
 ### Приём заявок — backend/app/admissions_api.py
 
 Персональные маршруты имеют префикс /api; публичные — /api/public. Все маршруты staff_router требуют активный аккаунт персонала; дополнительно отмеченные операции требуют оператора.
@@ -161,7 +175,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 - backend/app/api.py: основной router; обработчики перечислены выше. Вспомогательные функции: natural_room_key, page_result, ensure_due_periods, verify_room_capacity, net_payment, get_report_rows, spreadsheet_safe, xlsx_file, pdf_file. Здесь находятся проверки данных/условий операций, расчёты панели и формирование экспортов.
 - backend/app/admissions_api.py: staff_router/public_router; route handlers are listed in the route table. Helpers include `_digest`, `_aware`, `_require_staff`, `_rate_limit`, `_invitation_status`, `_invite_out`, `_event`, `_phone`, `_validate_extra`, `_apply_values`, `_public_application`, `_application`, `_student_session`, `_student_write_session`, `_set_student_session`, `_rotate_csrf`, `_public_campaign`, `_application_status`, `_public_file_out`, `_run_file_extraction`, `_schedule_file_extraction`. Extraction background tasks receive `allow_external_ai`; their conditional update cannot restore results after file deletion/replacement. `retry_public_file_extraction` honors a fresh external-provider consent and does not silently fall back to local OCR when external processing was selected.
 - backend/app/schemas.py: Pydantic-контракты запросов и ответов для auth, сотрудников, комнат, жителей, billing, платежей, расходов, отчётов, кампаний, приглашений, публичных анкет/статусов и файлов. `PublicCampaignOut` reports `ai_processing_issue`, `local_ocr_available`, and `external_ai_processing_available`. Validators: ResidentFields.validate_billing_range, ResidentUpdate.validate_billing_range, ExtendRequest.require_one_method, ExpenseCreate.normalized_description_required, ExpenseVoid.normalized_reason_required, PaymentAdjustmentCreate.nonzero_amount, CustomFieldDefinition.validate_options, ApplicationDraftIn.ordered_dates, ApplicationApproveIn.ordered_stay.
-- backend/app/models.py: SQLAlchemy-модели и ограничения: User, Room, Resident, BillingPeriod, BillingChange, Payment, Expense, PaymentAdjustment, AuditEvent, Notification, SystemSetting, Dormitory, AdmissionCampaign, AdmissionInvitation, StudentApplication, ApplicationStatusEvent, ApplicationAccessSession, ApplicationFile, ApplicationFileBlob, ResidencePeriod, PublicRateLimit. utcnow создаёт UTC timestamp.
+- backend/app/models.py: SQLAlchemy-модели и ограничения: User, Room, Resident, BillingPeriod, BillingChange, Payment, Expense, PaymentAdjustment, AuditEvent, Notification, SystemSetting, Dormitory, AdmissionCampaign, AdmissionInvitation, StudentApplication, ApplicationStatusEvent, ApplicationAccessSession, ApplicationFile, ApplicationFileBlob, ResidencePeriod, StaffTask, PublicRateLimit. utcnow создаёт UTC timestamp.
 
 ### Бизнес-логика и сервисы
 
@@ -188,7 +202,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 ## Frontend
 
 - frontend/src/main.tsx: монтирует React, Ant Design Uzbek locale, dayjs locale, CSS и AuthProvider.
-- frontend/src/App.tsx: App маршруты; Login, Shell, Protected, Home, OperatorOnly; лениво загружает страницы. Маршруты сотрудников требуют пользователя, вкладки пользователей и аудита скрыты/защищены также проверкой OPERATOR в клиенте. Только маршрут `/app` получает компактную оболочку панели; на ширине от 576 px сохраняется боковая навигация, остальные экраны продолжают использовать обычную адаптивную оболочку.
+- frontend/src/App.tsx: App маршруты (включая `/tasks`); Login, Shell, Protected, Home, OperatorOnly; лениво загружает страницы. Shell раз в 60 с (только во видимой вкладке) опрашивает GET /notifications, при новых уведомлениях проигрывает звук, по клику на уведомление переходит к задаче или жителю, открывает CommandPalette по Ctrl/⌘+K, переключает звук и оборачивает Outlet в `.page-transition`. Маршруты сотрудников требуют пользователя, вкладки пользователей и аудита скрыты/защищены также проверкой OPERATOR в клиенте. Только маршрут `/app` получает компактную оболочку панели; на ширине от 576 px сохраняется боковая навигация, остальные экраны продолжают использовать обычную адаптивную оболочку.
 - frontend/src/auth.tsx: AuthProvider и useAuth (login, logout, reloadUser, начальная проверка сессии).
 - frontend/src/api.ts: Axios api с Bearer header, автоматическим однократным refresh, saveSession, clearSession, hasSession, errorMessage. Добавляйте общие HTTP-поведения здесь; никогда не помещайте серверный секрет в VITE_ переменную.
 - frontend/src/types.ts: TypeScript-контракты API (Role, User, Room, Resident, BillingPeriod/Change, Payment/Adjustment, Expense, Dashboard, Settings, Audit, admissions и public session types).
@@ -204,7 +218,10 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 - frontend/src/pages/AdminGuide.tsx: узбекское руководство персоналу.
 - frontend/src/pages/Landing.tsx: публичная лендинг-страница; DashboardPreview.
 - frontend/src/pages/shared.tsx: переиспользуемые PageHeading, Panel, EmptyBlock, Actions.
-- frontend/src/styles.css, landing.css, app-overrides.css: базовые стили SPA и лендинга; `app-overrides.css` содержит стили, ограниченные оболочкой `/app`, для центрированного компактного окна, светлой узкой навигации, сетки панели и мобильной компоновки.
+- frontend/src/styles.css, landing.css, app-overrides.css, motion.css: базовые стили SPA и лендинга; `app-overrides.css` содержит стили, ограниченные оболочкой `/app`, для центрированного компактного окна, светлой узкой навигации, сетки панели и мобильной компоновки. `motion.css` добавляет переходы страниц (`.page-transition`), hover-эффекты, стили командной палитры, кнопки звука и Kanban-доски; при `prefers-reduced-motion: reduce` анимации отключаются.
+- frontend/src/pages/Tasks.tsx: маршрут `/tasks` (доступ — Персонал); `Tasks` и `initials`. Kanban с колонками Rejada / Jarayonda / Bajarildi (и Bekor qilingan при включённом переключателе). Карточки перетаскиваются HTML5 drag-and-drop; на устройствах без перетаскивания есть меню «Ko‘chirish». Изменение статуса применяется оптимистично и откатывается, если сервер вернул ошибку. Есть сводка и прогресс, фильтры scope и поиска, модальное окно создания/редактирования (исполнитель, комната, срок, приоритет). `/tasks?new=1` сразу открывает создание. Редактирование в интерфейсе следует серверному `can_edit`.
+- frontend/src/CommandPalette.tsx: `CommandPalette`, тип `PaletteCommand`, `normalize` (объединяет варианты узбекского апострофа при поиске). Открывается по Ctrl/⌘+K или кнопкой в шапке; навигация стрелками и Enter. Команды строит Shell в App.tsx: пункты меню с учётом роли, «Yangi vazifa», включение/выключение звука и выход.
+- frontend/src/sound.ts: `playSound`, `soundEnabled`, `setSoundEnabled`, `onSoundChange`, внутренние `audio` и `tone`. Короткие звуки (success, error, notify, drop, click, open) синтезируются Web Audio API без аудиофайлов и сетевых запросов. Настройка хранится в localStorage (`rsbest.sound`); ошибки аудио игнорируются.
 
 ## Именной каталог функций
 
@@ -244,6 +261,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 5. 20261026_03_postgres_application_file_blobs.py — приватные файловые blobs в PostgreSQL.
 6. 20261027_01_resident_departures.py — дата выезда.
 7. 20261028_01_openrouter_document_extraction.py — согласие на ИИ-обработку и структурированные предложения; удаление полей сохранённого OCR-текста.
+8. 20261030_01_staff_tasks.py (20261030_01, revises 20261028_01) — таблица `staff_tasks` (модель `StaffTask`): CHECK по статусу (TODO/IN_PROGRESS/DONE/CANCELLED) и приоритету (LOW/NORMAL/HIGH/URGENT), FK на users (assignee SET NULL, created_by RESTRICT), rooms и residents (SET NULL), индексы по assignee_id, created_by, (status, due_date). Downgrade удаляет индексы и таблицу.
 
 Всегда добавляйте новую Alembic-ревизию, проверяйте upgrade/downgrade на поддерживаемых PostgreSQL и SQLite тестовой схеме; не переписывайте применённую миграцию без явного плана восстановления.
 
@@ -261,7 +279,10 @@ Document extraction changes do not require a schema migration. `ApplicationFile.
 | test_admissions.py | одобрение, связи жителя, кампании/приглашения, приватные файлы, хранение, дубли, сессии заявителя, фоновые AI-статусы, безопасная классификация HTTP-ошибок провайдера, согласие и повтор обработки, parsing labelled text/nested JSON extraction responses. |
 | test_notifications.py | адресность уведомлений и создание планировщиком. |
 | test_reports.py | CSV/XLSX/PDF и защита spreadsheet от formula injection. |
-| test_migrations.py | построение и обратное удаление схемы и миграционный backfill. |
+| test_migrations.py | построение и обратное удаление схемы и миграционный backfill, включая `staff_tasks`. |
+| test_tasks.py | доска задач: 401 без токена; назначение оператором, личное уведомление и аудит; ADMIN не может назначать других и править чужие задачи; список исполнителей без email; переходы статусов и `completed_at`; уведомление автора о выполнении; отмена вместо удаления (DELETE отвечает 405); валидация, сортировка и фильтры. |
+
+Staff task board, command palette, sounds and motion (2026-10-30): added the `StaffTask` model and migration `20261030_01`, router `backend/app/tasks_api.py`, page `/tasks`, `CommandPalette.tsx`, `sound.ts`, `motion.css`; Shell gained the Vazifalar menu item, a palette trigger, a sound toggle, page-transition wrapper and GET-only notification polling every 60 s (only when the tab is visible; plays a chime for new items). Clicking a TASK notification opens `/tasks`; clicking a billing reminder opens `/residents?resident_id=…`. Uzbek labels for tasks/palette/audit are in `uz.ts`. Verification: full backend suite passed (43 tests, including 5 new task tests and the extended migration test); frontend TypeScript `tsc --noEmit` passed and the Vite production build passed with the existing large-chunk warning (the new `Tasks` chunk is ~30 kB). Rendered visual review in a browser was not performed in this environment.
 
 Verification for the local OCR changes: Python `py_compile` passed; frontend TypeScript `tsc --noEmit` and Vite production build passed (existing warning: one chunk is over 500 kB). Backend tests were not run. Tesseract and Docker are unavailable in this Windows environment, so the OCR engine and Docker image were not executed here; OCR quality still needs evaluation with synthetic, non-personal samples.
 
@@ -291,11 +312,11 @@ Financial write retry safety (2026-10-30): `create_payment` and `create_expense`
 Ниже перечислены сопровождаемые исходные файлы, а не генерируемые каталоги node_modules, dist, .venv и кэши:
 
 - Корень: AGENTS.md, README.md, amain.txt, docker-compose.yml, netlify.toml, main.py, .env.example, .gitignore.
-- Backend app: backend/app/__init__.py, admissions_api.py, ai_extraction.py, api.py, audit.py, billing.py, bootstrap.py, config.py, db.py, dependencies.py, file_storage.py, main.py, models.py, purge_expired_files.py, residency.py, scheduled_jobs.py, schemas.py, security.py, seed.py, services.py, telegram.py.
-- Alembic: backend/alembic.ini, backend/alembic/env.py, backend/alembic/script.py.mako и семь ревизий, перечисленных в разделе миграций.
-- Backend tests: backend/tests/__init__.py, conftest.py, test_admissions.py, test_billing.py, test_expenses.py, test_idempotency.py, test_migrations.py, test_notifications.py, test_permissions.py, test_reports.py.
+- Backend app: backend/app/__init__.py, admissions_api.py, ai_extraction.py, api.py, audit.py, billing.py, bootstrap.py, config.py, db.py, dependencies.py, file_storage.py, main.py, models.py, purge_expired_files.py, residency.py, scheduled_jobs.py, schemas.py, security.py, seed.py, services.py, tasks_api.py, telegram.py.
+- Alembic: backend/alembic.ini, backend/alembic/env.py, backend/alembic/script.py.mako и восемь ревизий, перечисленных в разделе миграций.
+- Backend tests: backend/tests/__init__.py, conftest.py, test_admissions.py, test_billing.py, test_expenses.py, test_idempotency.py, test_migrations.py, test_notifications.py, test_permissions.py, test_reports.py, test_tasks.py.
 - Frontend root: frontend/Dockerfile, .dockerignore, .nvmrc, index.html, nginx.conf, package.json, package-lock.json, tsconfig.json, tsconfig.node.json, vite.config.ts.
-- Frontend scripts/source: frontend/scripts/write-netlify-redirects.mjs; frontend/src/App.tsx, api.ts, app-overrides.css, auth.tsx, landing.css, main.tsx, styles.css, types.ts, locales/uz.ts; страницы AdminGuide.tsx, Admissions.tsx, Dashboard.tsx, Expenses.tsx, Landing.tsx, Payments.tsx, Reports.tsx, Residents.tsx, Rooms.tsx, Settings.tsx, shared.tsx.
+- Frontend scripts/source: frontend/scripts/write-netlify-redirects.mjs; frontend/src/App.tsx, CommandPalette.tsx, api.ts, app-overrides.css, auth.tsx, landing.css, main.tsx, motion.css, sound.ts, styles.css, types.ts, locales/uz.ts; страницы AdminGuide.tsx, Admissions.tsx, Dashboard.tsx, Expenses.tsx, Landing.tsx, Payments.tsx, Reports.tsx, Residents.tsx, Rooms.tsx, Settings.tsx, Tasks.tsx, shared.tsx.
 - Deploy/docs/editor: scripts/deploy-netlify.ps1, scripts/deploy-railway.ps1, .railway/package.json, package-lock.json, railway.ts, docs/PROJECT_INDEX.md, docs/PROJECT_PROMPTS.md, .vscode/settings.json.
 - Корневой .env и dormflow-local.sqlite3 игнорируются и намеренно не индексируются; не добавляйте их содержимое сюда.
 

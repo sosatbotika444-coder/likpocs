@@ -347,6 +347,59 @@ class NotificationOut(ORMModel):
     created_at: datetime
 
 
+TaskStatus = Literal["TODO", "IN_PROGRESS", "DONE", "CANCELLED"]
+TaskPriority = Literal["LOW", "NORMAL", "HIGH", "URGENT"]
+
+
+class StaffTaskCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    priority: TaskPriority = "NORMAL"
+    due_date: date | None = None
+    assignee_id: UUID | None = None
+    room_id: UUID | None = None
+    resident_id: UUID | None = None
+
+
+class StaffTaskUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=160)
+    description: str | None = Field(default=None, max_length=4000)
+    status: TaskStatus | None = None
+    priority: TaskPriority | None = None
+    due_date: date | None = None
+    assignee_id: UUID | None = None
+    room_id: UUID | None = None
+    resident_id: UUID | None = None
+
+
+class StaffTaskOut(BaseModel):
+    id: UUID
+    title: str
+    description: str
+    status: TaskStatus
+    priority: TaskPriority
+    due_date: date | None
+    assignee_id: UUID | None
+    assignee_name: str | None
+    created_by: UUID
+    created_by_name: str
+    room_id: UUID | None
+    room_number: str | None
+    resident_id: UUID | None
+    resident_name: str | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    is_overdue: bool
+    can_edit: bool
+
+
+class TaskAssigneeOut(BaseModel):
+    id: UUID
+    full_name: str
+    role: Literal["OPERATOR", "ADMIN"]
+
+
 class SystemSettingsIn(BaseModel):
     dorm_name: str = Field(min_length=1, max_length=160)
     default_period_days: int = Field(gt=0, le=365000)
