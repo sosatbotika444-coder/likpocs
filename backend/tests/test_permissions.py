@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -41,6 +41,20 @@ def test_admin_cannot_extend_billing_when_not_authorized(client, operator_token,
         "first_name": "A", "last_name": "Resident", "payment_period_days": 30, "agreed_price": "500000", "billing_start": tday(),
     }).json()
     response = client.post(f"/api/residents/{person['id']}/extend", headers={"Authorization": f"Bearer {admin_token}"}, json={"days": 5})
+    assert response.status_code == 403
+
+
+def test_admin_cannot_prorate_an_active_paid_period_at_checkout(client, operator_token, admin_token):
+    start = datetime.now(ZoneInfo("Asia/Tashkent")).date() - timedelta(days=8)
+    headers = {"Authorization": f"Bearer {operator_token}"}
+    person = client.post("/api/residents", headers=headers, json={
+        "first_name": "Checkout", "last_name": "Protected", "check_in_date": start.isoformat(),
+        "payment_period_days": 30, "agreed_price": "300000", "billing_start": start.isoformat(),
+        "billing_end": (start + timedelta(days=30)).isoformat(),
+    }).json()
+    response = client.post(f"/api/residents/{person['id']}/checkout", headers={"Authorization": f"Bearer {admin_token}"}, json={
+        "checkout_date": (start + timedelta(days=7)).isoformat(), "reason": "Erta chiqish",
+    })
     assert response.status_code == 403
 
 

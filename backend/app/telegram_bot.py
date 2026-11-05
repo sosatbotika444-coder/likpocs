@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from fastapi import HTTPException
 from sqlalchemy import select
 
@@ -62,6 +62,25 @@ def chunks(text: str) -> list[str]:
 
 def button(text: str, data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]])
+
+
+def main_menu(role: str | None, has_application: bool) -> ReplyKeyboardMarkup:
+    """Role-scoped persistent buttons. Labels are slash commands, so they reuse the audited handlers."""
+    if role == "INVESTOR":
+        rows = [["/summary"], ["/help", "/unlink"]]
+    elif role == "OPERATOR":
+        rows = [["/applications", "/rooms"], ["/residents", "/tasks"], ["/tasknew", "/notifications"], ["/summary", "/help"]]
+    elif role == "ADMIN":
+        rows = [["/applications", "/rooms"], ["/residents", "/tasks"], ["/tasknew", "/notifications"], ["/help", "/unlink"]]
+    elif has_application:
+        rows = [["/profile", "/status"], ["/continue", "/edit"], ["/contract", "/help"]]
+    else:
+        rows = [["/help", "/link"]]
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=item) for item in row] for row in rows],
+        resize_keyboard=True,
+        input_field_placeholder="Buyruq yoki tugmani tanlang",
+    )
 
 
 def load_context(db, chat_id: int):
@@ -116,7 +135,7 @@ def start_flow(db, chat_id, tg_id, username, full_name, token):
     return application.id, application.reference, application.status
 
 
-@router.message(Command("start"))
+@router.message(Command("legacy_start"))
 async def cmd_start(message: Message, command: CommandObject, state: FSMContext) -> None:
     await state.clear()
     chat_id, tg_id, username, full_name = sender_info(message)
@@ -147,6 +166,25 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext)
         await message.answer(f"Ariza {app_info[2]}. /status — holatni ko‘rish, /continue — davom ettirish.")
     else:
         await message.answer("RS Best Hostel botiga xush kelibsiz.\nAriza berish uchun xodimdan taklif havolasini oling va u orqali botni oching.\nXodim bo‘lsangiz: saytdagi Sozlamalar → Telegram bo‘limidan kod oling va /link KOD yozing.")
+
+
+@router.message(Command("start"))
+async def cmd_start_with_menu(message: Message, command: CommandObject, state: FSMContext) -> None:
+    await cmd_start(message, command, state)
+    staff_info, application_info = await current_info(message.chat.id)
+    await message.answer(
+        "Quyidagi tugmalar orqali davom eting.",
+        reply_markup=main_menu(staff_info[0] if staff_info else None, application_info is not None),
+    )
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message) -> None:
+    staff_info, application_info = await current_info(message.chat.id)
+    await message.answer(
+        "Asosiy menyu:",
+        reply_markup=main_menu(staff_info[0] if staff_info else None, application_info is not None),
+    )
 
 
 @router.message(Command("link"))

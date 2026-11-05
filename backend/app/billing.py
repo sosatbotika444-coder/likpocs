@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -226,3 +226,79 @@ def close_unpaid_future_periods_for_departure(
         })
         closed_ids.append(period.id)
     return closed_ids
+
+
+def prorate_current_period_for_checkout(
+    db: Session, resident: Resident, actor: User, checkout_date: date, reason: str,
+) -> tuple[BillingPeriod | None, Decimal]:
+    """Close the active billing period at departure and preserve any refund as adjustments.
+
+    Billing intervals are [start_date, end_date): a checkout on day 18 after
+    moving in on day 1 is 17 occupied days. Posted payments are never edited;
+    if a resident paid more than the recalculated charge, negative
+    ``PaymentAdjustment`` rows record the credit/refund amount.
+    """
+    period = db.scalar(
+        select(BillingPeriod)
+        .where(
+            BillingPeriod.resident_id == resident.id,
+            BillingPeriod.status.in_(("OPEN", "PAID")),
+            BillingPeriod.start_date < checkout_date,
+            BillingPeriod.end_date > checkout_date,
+        )
+        .order_by(BillingPeriod.start_date.desc())
+        .with_for_update()
+    )
+    if period is None:
+        return None, ZERO
+
+    old_start, old_end, old_charge = period.start_date, period.end_date, period.charge_amount
+    used_days = (checkout_date - old_start).days
+    original_days = (old_end - old_start).days
+    new_charge = (old_charge * Decimal(used_days) / Decimal(original_days)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    paid_before = period_paid(db, period.id)
+
+    period.end_date = checkout_date
+    period.period_days = used_days
+    period.charge_amount = new_charge
+    period.status = "CLOSED"
+    db.add(BillingChange(
+        resident_id=resident.id, billing_period_id=period.id,
+        old_start_date=old_start, old_end_date=old_end, old_charge_amount=old_charge,
+        new_start_date=old_start, new_end_date=checkout_date, new_charge_amount=new_charge,
+        change_type="EARLY_CHECKOUT_PRORATED", reason=reason, changed_by=actor.id,
+    ))
+
+    credit = max(ZERO, paid_before - new_charge)
+    if credit:
+        remaining = credit
+        payments = db.scalars(
+            select(Payment).where(Payment.billing_period_id == period.id)
+            .order_by(Payment.payment_date.desc(), Payment.created_at.desc()).with_for_update()
+        ).all()
+        adjustments = db.scalars(
+            select(PaymentAdjustment).where(PaymentAdjustment.payment_id.in_([item.id for item in payments]))
+        ).all() if payments else []
+        net_by_payment = {item.id: item.amount for item in payments}
+        for adjustment in adjustments:
+            net_by_payment[adjustment.payment_id] = net_by_payment.get(adjustment.payment_id, ZERO) + adjustment.amount_delta
+        for payment in payments:
+            amount = min(remaining, max(ZERO, net_by_payment[payment.id]))
+            if amount:
+                db.add(PaymentAdjustment(
+                    payment_id=payment.id, amount_delta=-amount,
+                    reason=f"Muddatidan oldin chiqish qayta hisobi: {reason}", adjusted_by=actor.id,
+                ))
+                remaining -= amount
+            if remaining == ZERO:
+                break
+        if remaining:
+            raise RuntimeError("To'lov tuzatmasi uchun yetarli mablag' topilmadi.")
+
+    audit(db, actor, "BILLING_EARLY_CHECKOUT_PRORATED", "BillingPeriod", period.id, {
+        "resident_id": str(resident.id), "checkout_date": checkout_date.isoformat(),
+        "old_end_date": old_end.isoformat(), "new_end_date": checkout_date.isoformat(),
+        "old_charge_amount": str(old_charge), "new_charge_amount": str(new_charge),
+        "credit_or_refund": str(credit),
+    })
+    return period, credit

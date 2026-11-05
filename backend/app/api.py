@@ -33,6 +33,7 @@ from app.billing import (
     mark_paid_and_advance,
     period_balance,
     period_paid,
+    prorate_current_period_for_checkout,
     set_period_dates,
 )
 from app.config import settings
@@ -629,14 +630,26 @@ def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session =
         raise HTTPException(status_code=409, detail="Yashovchining chiqishi oldin rasmiylashtirilgan.")
     if payload.checkout_date > today_local():
         raise HTTPException(status_code=422, detail="Chiqish sanasi bugundan keyin bo'lishi mumkin emas.")
-    if resident.check_in_date and payload.checkout_date < resident.check_in_date:
-        raise HTTPException(status_code=422, detail="Chiqish sanasi ko'chib kirish sanasidan oldin bo'lishi mumkin emas.")
+    if resident.check_in_date and payload.checkout_date <= resident.check_in_date:
+        raise HTTPException(status_code=422, detail="Chiqish sanasi ko'chib kirish sanasidan keyin bo'lishi kerak.")
 
     old_room_id = resident.room_id
+    checkout_reason = payload.reason.strip() or "Muddatidan oldin chiqish"
+    active_billing = db.scalar(select(BillingPeriod.id).where(
+        BillingPeriod.resident_id == resident.id,
+        BillingPeriod.status.in_(("OPEN", "PAID")),
+        BillingPeriod.start_date < payload.checkout_date,
+        BillingPeriod.end_date > payload.checkout_date,
+    ).with_for_update())
+    if active_billing and actor.role != "OPERATOR":
+        raise HTTPException(status_code=403, detail="Muddatidan oldin chiqish qayta hisobi uchun operator kerak.")
+    prorated_period, credit_or_refund = prorate_current_period_for_checkout(
+        db, resident, actor, payload.checkout_date, checkout_reason,
+    ) if active_billing else (None, Decimal("0.00"))
     close_open_period(db, resident, payload.checkout_date)
     closed_billing_ids = close_unpaid_future_periods_for_departure(
         db, resident, actor, payload.checkout_date,
-        payload.reason.strip() or "Muddatidan oldin chiqish",
+        checkout_reason,
     )
     resident.room_id = None
     resident.departed_on = payload.checkout_date
@@ -644,8 +657,10 @@ def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session =
     audit(db, actor, "RESIDENT_CHECKED_OUT", "Resident", resident.id, {
         "checkout_date": payload.checkout_date.isoformat(),
         "previous_room_id": str(old_room_id) if old_room_id else None,
-        "reason": payload.reason.strip() or "Muddatidan oldin chiqish",
-        "billing_policy": "Joriy hisob va to'lovlar saqlanadi; to'lovsiz boshlanmagan davrlar yopiladi; yangi davr ochilmaydi.",
+        "reason": checkout_reason,
+        "billing_policy": "Joriy davr haqiqiy kunlar bo'yicha qayta hisoblanadi; yozilgan to'lov o'zgarmaydi, ortiqcha summa alohida tuzatma orqali qaytarim/kredit sifatida qayd qilinadi; yangi davr ochilmaydi.",
+        "prorated_billing_period_id": str(prorated_period.id) if prorated_period else None,
+        "credit_or_refund": str(credit_or_refund) if actor.role == "OPERATOR" else None,
         "closed_unpaid_billing_period_ids": [str(item) for item in closed_billing_ids],
     })
     db.commit()

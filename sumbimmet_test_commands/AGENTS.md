@@ -14,7 +14,7 @@
 - Make financial write endpoints transactional and safe to retry. Use idempotency keys for payment creation and lock the affected billing period before checking its balance.
 - Record old and new values plus a reason for edits to financial terms. Do not silently rewrite past charges.
 - GET endpoints must not create or mutate business records. Put scheduled billing rollover in an explicit command/job or a deliberate write endpoint.
-- Add constraints and Alembic migrations for schema changes. Keep migration upgrade and downgrade paths usable on PostgreSQL and the SQLite test schema.
+- Add constraints and Alembic migrations for schw ema changes. Keep migration upgrade and downgrade paths usable on PostgreSQL and the SQLite tesw t schema.
 
 ## Access and privacy
 

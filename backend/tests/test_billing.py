@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 from datetime import datetime
 
@@ -101,6 +102,38 @@ def test_overpayment_cannot_be_silently_applied(client, operator_token):
         "resident_id": person["id"], "amount": "600001", "payment_date": tday().isoformat(), "method": "CASH",
     })
     assert response.status_code == 422
+
+
+def test_early_checkout_prorates_charge_and_records_refund_as_a_payment_adjustment(client, operator_token):
+    start = tday() - timedelta(days=20)
+    checkout = start + timedelta(days=17)
+    created = client.post("/api/residents", headers={"Authorization": f"Bearer {operator_token}"}, json={
+        "first_name": "Erta", "last_name": "Chiquvchi", "check_in_date": start.isoformat(),
+        "payment_period_days": 30, "agreed_price": "300000", "billing_start": start.isoformat(),
+        "billing_end": (start + timedelta(days=30)).isoformat(),
+    })
+    assert created.status_code == 201, created.text
+    person = created.json()
+    paid = client.post("/api/payments", headers=payment_headers(operator_token, "checkout-prorata-001"), json={
+        "resident_id": person["id"], "amount": "300000", "payment_date": tday().isoformat(), "method": "CASH",
+    })
+    assert paid.status_code == 201, paid.text
+
+    response = client.post(f"/api/residents/{person['id']}/checkout", headers={"Authorization": f"Bearer {operator_token}"}, json={
+        "checkout_date": checkout.isoformat(), "reason": "Muddatidan oldin chiqdi",
+    })
+    assert response.status_code == 200, response.text
+    detail = client.get(f"/api/residents/{person['id']}", headers={"Authorization": f"Bearer {operator_token}"}).json()
+    period = detail["billing_history"][0]
+    assert period["period_days"] == 17
+    assert Decimal(period["charge_amount"]) == Decimal("170000.00")
+    assert Decimal(period["paid_amount"]) == Decimal("170000.00")
+    payments = client.get(f"/api/residents/{person['id']}/payments", headers={"Authorization": f"Bearer {operator_token}"}).json()
+    assert Decimal(payments[0]["amount"]) == Decimal("300000.00")
+    assert Decimal(payments[0]["net_amount"]) == Decimal("170000.00")
+    adjustment = client.get(f"/api/payments/{paid.json()['id']}/adjustments", headers={"Authorization": f"Bearer {operator_token}"})
+    assert adjustment.status_code == 200
+    assert Decimal(adjustment.json()[0]["amount_delta"]) == Decimal("-130000.00")
 
 
 def test_extension_is_separate_from_payment_and_preserves_old_dates(client, operator_token):

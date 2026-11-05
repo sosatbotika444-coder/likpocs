@@ -127,7 +127,7 @@ export default function Residents() {
       await api.post(`/residents/${checkoutTarget.id}/checkout`, {
         checkout_date: values.checkout_date.format('YYYY-MM-DD'), reason: values.reason?.trim() || 'Muddatidan oldin chiqish',
       });
-      notice.success({ message: 'Chiqish rasmiylashtirildi. Xona bo‘shatildi, yangi to‘lov davri ochilmaydi.' });
+      notice.success({ message: 'Chiqish rasmiylashtirildi. Xona bo‘shatildi va joriy davr haqiqiy kunlar bo‘yicha qayta hisoblandi.' });
       const person = checkoutTarget;
       setCheckoutTarget(null); checkoutForm.resetFields(); await load();
       if (detail?.id === person.id) await showDetail(person.id);
@@ -186,7 +186,7 @@ export default function Residents() {
     <Modal open={Boolean(checkoutTarget)} title="Muddatidan oldin chiqishni rasmiylashtirish" onCancel={() => { setCheckoutTarget(null); checkoutForm.resetFields(); }} onOk={() => checkoutForm.submit()} confirmLoading={checkingOut} okText="Chiqishni tasdiqlash" cancelText="Bekor qilish" destroyOnClose>
       {checkoutTarget && <div className="checkout-flow">
         <p><strong>{checkoutTarget.first_name} {checkoutTarget.last_name}</strong>{checkoutTarget.room_number ? ` · ${checkoutTarget.room_number}-xona` : ''}</p>
-          <Alert type="warning" showIcon message="Tanlangan sanadan boshlab xona bo‘sh hisoblanadi." description="Joriy hisob va qayd etilgan to‘lovlar o‘zgarmaydi, qolgan qarz saqlanadi. To‘lovsiz, hali boshlanmagan hisob davrlari yopiladi; qisman yoki to‘liq to‘langan davrlar o‘zgarmaydi. Chiqishdan keyin yangi davr ochilmaydi. Qaytarim yoki narxni qayta hisoblash kerak bo‘lsa, moliyaviy tuzatishni alohida kiriting." />
+          <Alert type="warning" showIcon message="Tanlangan sanadan boshlab xona bo‘sh hisoblanadi." description="Joriy hisob faqat haqiqiy yashagan kunlar bo‘yicha qayta hisoblanadi. To‘liq to‘langan bo‘lsa, ortiqcha summa alohida, auditli to‘lov tuzatmasi sifatida qaytarim/kreditga yoziladi; asl to‘lov o‘chirilmaydi. To‘lovsiz, hali boshlanmagan davrlar yopiladi va chiqishdan keyin yangi davr ochilmaydi." />
         <Form form={checkoutForm} layout="vertical" onFinish={checkout}>
           <Form.Item name="checkout_date" label="Xona bo‘sh bo‘ladigan sana" rules={[{ required: true, message: 'Sanani tanlang.' }]}><DatePicker className="full-width" format="DD.MM.YYYY" disabledDate={(current) => current.isAfter(dayjs(), 'day') || Boolean(checkoutTarget.check_in_date && current.isBefore(dayjs(checkoutTarget.check_in_date), 'day'))}/></Form.Item>
           <Form.Item name="reason" label="Izoh"><Input.TextArea rows={3} maxLength={1000} placeholder="Masalan: o‘quvchi o‘z xohishiga ko‘ra muddatidan oldin ketdi"/></Form.Item>
