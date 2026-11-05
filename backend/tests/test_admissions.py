@@ -1,4 +1,4 @@
-import io
+﻿import io
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -27,6 +27,9 @@ def _png_bytes() -> bytes:
     output = io.BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
+
+
+SUBMIT = {"consent": True, "contract_accepted": True, "signature_name": "Aziza Karimova"}
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -82,13 +85,13 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
     dormitory, _, invitation, raw_invite, public_session = _workflow(client, operator_token, admin_token)
 
     _fill_application(client, public_session)
-    submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert submitted.status_code == 200, submitted.text
     first_result = submitted.json()
     assert first_result["access_code"]
     assert raw_invite not in str(database.query(AdmissionInvitation).first().token_hash)
 
-    retry = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    retry = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert retry.status_code == 200, retry.text
     assert retry.json()["reference"] == first_result["reference"]
     assert retry.json()["access_code"] == ""
@@ -111,14 +114,14 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
     assert rejected_csrf.status_code == 403
     response = client.post("/api/public/application/respond", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"phone": "+998901112233"})
     assert response.status_code == 200, response.text
-    submitted_again = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    submitted_again = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert submitted_again.status_code == 200, submitted_again.text
     assert submitted_again.json()["access_code"] == ""
     assert application.tracking_code_hash
 
     asked_file = client.post(f"/api/admissions/applications/{application.id}/request-info", headers=admin, json={"reason": "Please upload a new photo.", "fields": ["photo"]})
     assert asked_file.status_code == 200
-    stale_file_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    stale_file_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert stale_file_submit.status_code == 422
     refreshed_photo = client.post(
         "/api/public/application/files",
@@ -127,10 +130,10 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
         files={"upload": ("new-photo.png", _png_bytes(), "image/png")},
     )
     assert refreshed_photo.status_code == 201
-    final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert final_submit.status_code == 200
 
-    room = client.post("/api/rooms", headers=admin, json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1, "price": "300000"})
+    room = client.post("/api/rooms", headers=_headers(operator_token), json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1, "price": "300000"})
     assert room.status_code == 201, room.text
     approved = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
         "reason": "Identity and documents checked.",
@@ -151,30 +154,35 @@ def test_admission_approval_creates_resident_billing_and_updates_statistics(clie
     assert periods[0].start_date.isoformat() == "2026-11-01"
     assert periods[0].end_date.isoformat() == "2026-12-01"
 
-    summary_headers = _headers(admin_token)
-    summary = client.get("/api/admissions/summary", headers=summary_headers)
+    # ADMIN can manage the application but must never receive money fields.
+    admin_summary = client.get("/api/admissions/summary", headers=_headers(admin_token))
+    assert admin_summary.status_code == 200, admin_summary.text
+    assert admin_summary.json()["approved_applications"] == 1
+    assert admin_summary.json()["linked_residents"] == 1
+    assert "expected_payments" not in admin_summary.json()
+
+    summary = client.get("/api/admissions/summary", headers=_headers(operator_token))
     assert summary.status_code == 200, summary.text
-    assert summary.json()["approved_applications"] == 1
-    assert summary.json()["linked_residents"] == 1
     assert Decimal(summary.json()["expected_payments"]) == Decimal("300000.00")
     assert Decimal(summary.json()["outstanding_debt"]) == Decimal("300000.00")
     assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("0.00")
 
     today = datetime.now(ZoneInfo("Asia/Tashkent")).date()
-    recorded_payment = client.post("/api/payments", headers={**admin, "Idempotency-Key": "admission-payment-01"}, json={
+    operator = _headers(operator_token)
+    recorded_payment = client.post("/api/payments", headers={**operator, "Idempotency-Key": "admission-payment-01"}, json={
         "resident_id": str(resident.id), "amount": "100000", "payment_date": today.isoformat(), "method": "CASH",
     })
     assert recorded_payment.status_code == 201, recorded_payment.text
-    summary = client.get("/api/admissions/summary", headers=summary_headers)
+    summary = client.get("/api/admissions/summary", headers=operator)
     assert Decimal(summary.json()["actual_revenue_this_month"]) == Decimal("100000.00")
     assert Decimal(summary.json()["outstanding_debt"]) == Decimal("200000.00")
 
-    expense = client.post("/api/expenses", headers={**admin, "Idempotency-Key": "admission-expense-01"}, json={
+    expense = client.post("/api/expenses", headers={**operator, "Idempotency-Key": "admission-expense-01"}, json={
         "expense_date": today.isoformat(), "category": "UTILITIES", "description": "Test utility cost",
         "amount": "25000", "method": "CASH", "reference": "",
     })
     assert expense.status_code == 201, expense.text
-    dashboard = client.get("/api/dashboard", headers=summary_headers)
+    dashboard = client.get("/api/dashboard", headers=operator)
     assert dashboard.status_code == 200, dashboard.text
     assert Decimal(dashboard.json()["actual_revenue"]) == Decimal("100000.00")
     assert Decimal(dashboard.json()["actual_expenses"]) == Decimal("25000.00")
@@ -199,7 +207,7 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
     dormitory, _, _, _, public_session = _workflow(client, operator_token, admin_token)
     admin = _headers(admin_token)
-    room = client.post("/api/rooms", headers=admin, json={
+    room = client.post("/api/rooms", headers=_headers(operator_token), json={
         "number": "303", "dormitory_id": dormitory["id"], "floor": 3, "capacity": 2, "price": "500000",
     })
     assert room.status_code == 201, room.text
@@ -215,15 +223,21 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     database.commit()
 
     _fill_application(client, public_session)
-    submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+    submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
     assert submitted.status_code == 200, submitted.text
     application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
     assert application is not None
     duplicates = client.get(f"/api/admissions/applications/{application.id}/duplicates", headers=admin)
     assert duplicates.status_code == 200, duplicates.text
     assert duplicates.json()[0]["id"] == existing.json()["id"]
-    assert Decimal(duplicates.json()[0]["agreed_price"]) == Decimal("400000.00")
-    assert duplicates.json()[0]["payment_period_days"] == 30
+    assert "agreed_price" not in duplicates.json()[0]
+    operator_duplicates = client.get(
+        f"/api/admissions/applications/{application.id}/duplicates",
+        headers=_headers(operator_token),
+    )
+    assert Decimal(operator_duplicates.json()[0]["agreed_price"]) == Decimal("400000.00")
+    assert "payment_period_days" not in duplicates.json()[0]
+    assert operator_duplicates.json()[0]["payment_period_days"] == 30
 
     approved = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
         "reason": "Existing record verified.", "room_id": room.json()["id"], "move_in": "2026-11-01",
@@ -245,7 +259,7 @@ def test_approval_links_matching_resident_without_duplicate_billing(client, data
     assert approval_audit.details["previous_departed_on"] == "2026-10-20"
     resident_list = client.get("/api/residents", headers=admin, params={"departed": "active"})
     assert resident_list.status_code == 200, resident_list.text
-    assert resident_list.json()["total"] == 1
+    assert resident_list.json()["count"] == 1
 
 
 def test_approved_application_without_resident_can_be_repaired(client, database, operator_token, admin_token, tmp_path, monkeypatch):
@@ -255,7 +269,7 @@ def test_approved_application_without_resident_can_be_repaired(client, database,
     submitted = client.post(
         "/api/public/application/submit",
         headers={"X-CSRF-Token": public_session["csrf_token"]},
-        json={"consent": True},
+        json=SUBMIT,
     )
     assert submitted.status_code == 200, submitted.text
     application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
@@ -266,7 +280,7 @@ def test_approved_application_without_resident_can_be_repaired(client, database,
     application.terminal_at = datetime.now(UTC)
     original_terminal_at = application.terminal_at
     database.commit()
-    room = client.post("/api/rooms", headers=_headers(admin_token), json={
+    room = client.post("/api/rooms", headers=_headers(operator_token), json={
         "number": "404", "dormitory_id": dormitory["id"], "floor": 4, "capacity": 1, "price": "300000",
     })
     assert room.status_code == 201, room.text
@@ -298,7 +312,8 @@ def test_approved_application_without_resident_can_be_repaired(client, database,
     assert database.scalar(select(func.count(BillingPeriod.id))) == 1
     resident_list = client.get("/api/residents", headers=_headers(admin_token), params={"departed": "active"})
     assert resident_list.status_code == 200, resident_list.text
-    assert resident_list.json()["total"] == 1
+    assert resident_list.json()["count"] == 1
+    assert "agreed_price" not in resident_list.json()["items"][0]
 
 
 def test_openrouter_failure_status_mapping_is_actionable_and_safe():
@@ -643,11 +658,11 @@ def test_room_stay_intervals_reject_overlapping_approvals(client, operator_token
     monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
     dormitory, _, _, invitation_token, first_session = _workflow(client, operator_token, admin_token, max_submissions=2)
     admin = _headers(admin_token)
-    room = client.post("/api/rooms", headers=admin, json={"number": "202", "dormitory_id": dormitory["id"], "floor": 2, "capacity": 1, "price": "250000"})
+    room = client.post("/api/rooms", headers=_headers(operator_token), json={"number": "202", "dormitory_id": dormitory["id"], "floor": 2, "capacity": 1, "price": "250000"})
     assert room.status_code == 201, room.text
 
     _fill_application(client, first_session)
-    first_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": first_session["csrf_token"]}, json={"consent": True})
+    first_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": first_session["csrf_token"]}, json=SUBMIT)
     first_id = client.get("/api/admissions/applications", headers=admin, params={"q": first_submit.json()["reference"]}).json()["items"][0]["id"]
     first_approval = client.post(f"/api/admissions/applications/{first_id}/approve", headers=admin, json={
         "reason": "Checked.", "room_id": room.json()["id"], "move_in": "2026-11-01", "move_out": "2026-12-01",
@@ -658,7 +673,7 @@ def test_room_stay_intervals_reject_overlapping_approvals(client, operator_token
     assert second_exchange.status_code == 200, second_exchange.text
     second_session = second_exchange.json()
     _fill_application(client, second_session, phone="+998909998877")
-    second_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": second_session["csrf_token"]}, json={"consent": True})
+    second_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": second_session["csrf_token"]}, json=SUBMIT)
     assert second_submit.status_code == 200, second_submit.text
     second_id = client.get("/api/admissions/applications", headers=admin, params={"q": second_submit.json()["reference"]}).json()["items"][0]["id"]
     conflict = client.post(f"/api/admissions/applications/{second_id}/approve", headers=admin, json={

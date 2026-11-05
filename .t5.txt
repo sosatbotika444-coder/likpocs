@@ -1,0 +1,4 @@
+﻿System.Management.Automation.RemoteException
+[notice] A new release of pip is available: 25.0.1 -> 26.2.2
+[notice] To update, run: python.exe -m pip install --upgrade pip
+3.31.0

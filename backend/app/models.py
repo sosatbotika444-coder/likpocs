@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -16,7 +16,7 @@ def utcnow() -> datetime:
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('OPERATOR', 'ADMIN')", name="ck_user_role"),)
+    __table_args__ = (CheckConstraint("role IN ('OPERATOR', 'ADMIN', 'INVESTOR')", name="ck_user_role"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
@@ -311,6 +311,12 @@ class StudentApplication(Base):
     consent_version: Mapped[str] = mapped_column(String(40), default="")
     consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ai_processing_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Lease agreement acceptance: the exact wording is identified by version + SHA-256, never rewritten later.
+    contract_version: Mapped[str] = mapped_column(String(40), default="")
+    contract_hash: Mapped[str] = mapped_column(String(64), default="")
+    contract_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    contract_signature_name: Mapped[str] = mapped_column(String(200), default="")
+    contract_signed_via: Mapped[str] = mapped_column(String(12), default="")
     tracking_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     assigned_to: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     review_reason: Mapped[str] = mapped_column(Text, default="")
@@ -433,6 +439,57 @@ class StaffTask(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TelegramAccount(Base):
+    """A Telegram chat bound to either a staff user or an applicant's application (never both)."""
+
+    __tablename__ = "telegram_accounts"
+    __table_args__ = (
+        UniqueConstraint("chat_id", name="uq_telegram_chat"),
+        CheckConstraint("user_id IS NULL OR application_id IS NULL", name="ck_telegram_single_identity"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    username: Mapped[str] = mapped_column(String(64), default="")
+    full_name: Mapped[str] = mapped_column(String(200), default="")
+    user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    application_id: Mapped[UUID | None] = mapped_column(ForeignKey("student_applications.id", ondelete="SET NULL"), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TelegramLinkCode(Base):
+    """One-time code a signed-in staff user types into the bot; only its hash is stored."""
+
+    __tablename__ = "telegram_link_codes"
+    __table_args__ = (UniqueConstraint("code_hash", name="uq_telegram_link_code_hash"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TelegramOutbox(Base):
+    """Queued bot messages; the bot worker sends them so API requests never wait for Telegram."""
+
+    __tablename__ = "telegram_outbox"
+    __table_args__ = (Index("ix_telegram_outbox_pending", "sent_at", "created_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(String(32), default="INFO")
+    text: Mapped[str] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PublicRateLimit(Base):

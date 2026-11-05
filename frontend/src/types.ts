@@ -1,5 +1,5 @@
-export type Role = 'OPERATOR' | 'ADMIN';
-export type User = { id: string; email: string; full_name: string; role: Role; is_active: boolean; is_primary: boolean; created_at: string };
+export type Role = 'OPERATOR' | 'ADMIN' | 'INVESTOR';
+export type User = { id: string; email: string; full_name: string; role: Role; is_active: boolean; is_primary: boolean; created_at: string; can_view_money: boolean };
 export type Room = {
   id: string; dormitory_id: string; number: string; floor: number; capacity: number; price: number | null; notes: string;
   is_active: boolean; resident_count: number; available_beds: number;
@@ -55,6 +55,10 @@ export type Dashboard = {
   occupancy_by_room: { room: string; occupied: number; available: number }[];
   recent_payments: Payment[]; recent_residents: Resident[];
 };
+export type InvestorSummary = {
+  revenue: number; expenses: number; net_profit: number; outstanding_debt: number; occupancy_rate: number | null;
+  months: { year: number; month: number; revenue: number; expenses: number; net_profit: number }[];
+};
 export type SystemSettings = { dorm_name: string; default_period_days: number; currency: 'UZS'; updated_at: string | null; billing_change_allowed: boolean };
 export type AuditEvent = { id: string; actor_id: string | null; actor_name: string; action: string; entity_type: string; entity_id: string | null; details: Record<string, unknown>; created_at: string };
 export type PaymentAdjustment = { id: string; payment_id: string; amount_delta: number; reason: string; adjusted_by: string; created_at: string };
@@ -67,7 +71,7 @@ export type CustomField = { key: string; label: string; kind: 'text' | 'date' | 
 export type Invitation = {
   id: string; campaign_id: string; dormitory_id: string; expires_at: string; max_submissions: number;
   submission_count: number; paused_at: string | null; revoked_at: string | null; created_at: string;
-  status: 'ACTIVE' | 'PAUSED' | 'REVOKED' | 'EXPIRED' | 'EXHAUSTED'; link?: string | null;
+  status: 'ACTIVE' | 'PAUSED' | 'REVOKED' | 'EXPIRED' | 'EXHAUSTED'; link?: string | null; telegram_link?: string | null;
 };
 export type ApplicationData = {
   first_name_latin: string; last_name_latin: string; middle_name_latin: string;
@@ -90,6 +94,7 @@ export type Application = ApplicationData & {
   id: string; reference: string; status: string; requested_fields: string[]; review_reason: string;
   consent_version: string; invitation_id: string; campaign_id: string; dormitory_id: string;
   resident_id: string | null; assigned_to: string | null; internal_notes: string;
+  contract_version: string; contract_signature_name: string; contract_signed_via: string; contract_accepted_at?: string | null;
   files: ApplicationFile[]; events: ApplicationEvent[]; created_at: string; updated_at: string;
 };
 export type ApplicationQueueItem = {
@@ -97,7 +102,12 @@ export type ApplicationQueueItem = {
   phone: string; campaign_id: string; dormitory_id: string; assigned_to: string | null; created_at: string;
 };
 export type PublicCampaign = { name: string; custom_fields: CustomField[]; document_types: string[]; consent_version: string; consent_text: string; ai_processing_available: boolean; ai_processing_issue: string | null; local_ocr_available: boolean; external_ai_processing_available: boolean };
-export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string };
+export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string; contract_accepted_at?: string | null };
+export type ContractSection = { title: string; clauses: string[] };
+export type Contract = { version: string; hash: string; title: string; number: string; date: string; city: string; sections: ContractSection[] };
+export type StaffContract = Contract & { signed: boolean; signed_version: string; signed_hash_matches: boolean; signature_name: string; signed_at: string | null; signed_via: string };
+export type TelegramStatus = { configured: boolean; bot_username: string; linked: boolean; username: string };
+export type TelegramLinkCode = { code: string; expires_at: string; bot_username: string; link: string | null };
 export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ai_configured: boolean; ai_configuration_issue: string | null; local_ocr_configured: boolean; external_ai_configured: boolean; antivirus_configured: boolean };
 export type AdmissionSummary = {
   total_applications: number; applications_this_month: number; pending_applications: number;

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.audit import audit, notify
 from app.db import get_db
-from app.dependencies import get_current_user
+from app.dependencies import require_operations_staff
 from app.models import Resident, Room, StaffTask, User
 from app.schemas import StaffTaskCreate, StaffTaskOut, StaffTaskUpdate, TaskAssigneeOut
 from app.services import today_local
@@ -83,7 +83,7 @@ def list_tasks(
     priority: Literal["LOW", "NORMAL", "HIGH", "URGENT"] | None = None,
     q: str = Query(default="", max_length=120),
     include_cancelled: bool = False,
-    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_operations_staff),
 ) -> list[StaffTaskOut]:
     query = select(StaffTask)
     if not include_cancelled:
@@ -104,7 +104,7 @@ def list_tasks(
 
 
 @router.get("/tasks/summary")
-def task_summary(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> dict[str, int]:
+def task_summary(db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> dict[str, int]:
     today = today_local()
     counts = {status: count for status, count in db.execute(select(StaffTask.status, func.count(StaffTask.id)).group_by(StaffTask.status)).all()}
     overdue = db.scalar(select(func.count(StaffTask.id)).where(StaffTask.status.in_(OPEN_STATUSES), StaffTask.due_date < today)) or 0
@@ -117,16 +117,16 @@ def task_summary(db: Session = Depends(get_db), actor: User = Depends(get_curren
 
 
 @router.get("/tasks/assignees", response_model=list[TaskAssigneeOut])
-def task_assignees(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> list[TaskAssigneeOut]:
+def task_assignees(db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> list[TaskAssigneeOut]:
     """Active staff names for the assignee picker; emails and account details are not exposed."""
-    users = db.scalars(select(User).where(User.is_active.is_(True)).order_by(User.full_name)).all()
+    users = db.scalars(select(User).where(User.is_active.is_(True), User.role.in_(("OPERATOR", "ADMIN"))).order_by(User.full_name)).all()
     if actor.role != "OPERATOR":
         users = [item for item in users if item.id == actor.id]
     return [TaskAssigneeOut(id=item.id, full_name=item.full_name, role=item.role) for item in users]
 
 
 @router.post("/tasks", response_model=StaffTaskOut, status_code=201)
-def create_task(payload: StaffTaskCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> StaffTaskOut:
+def create_task(payload: StaffTaskCreate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> StaffTaskOut:
     assignee = _check_assignee(db, actor, payload.assignee_id)
     _check_links(db, payload.room_id, payload.resident_id)
     task = StaffTask(
@@ -145,7 +145,7 @@ def create_task(payload: StaffTaskCreate, db: Session = Depends(get_db), actor: 
 
 
 @router.patch("/tasks/{task_id}", response_model=StaffTaskOut)
-def update_task(task_id: UUID, payload: StaffTaskUpdate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> StaffTaskOut:
+def update_task(task_id: UUID, payload: StaffTaskUpdate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> StaffTaskOut:
     task = db.scalar(select(StaffTask).where(StaffTask.id == task_id).with_for_update())
     if not task:
         raise HTTPException(status_code=404, detail="Vazifa topilmadi.")

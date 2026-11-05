@@ -32,6 +32,33 @@ export default defineRailway(() => {
       INITIAL_OPERATOR_EMAIL: process.env.DORMFLOW_INITIAL_OPERATOR_EMAIL || preserve(),
       INITIAL_OPERATOR_PASSWORD: process.env.DORMFLOW_INITIAL_OPERATOR_PASSWORD || preserve(),
       INITIAL_OPERATOR_NAME: process.env.DORMFLOW_INITIAL_OPERATOR_NAME || 'Yotoqxona operatori',
+      // Optional extra accounts, created once at start-up when both email and password are set.
+      INITIAL_ADMIN_EMAIL: process.env.DORMFLOW_INITIAL_ADMIN_EMAIL || preserve(),
+      INITIAL_ADMIN_PASSWORD: process.env.DORMFLOW_INITIAL_ADMIN_PASSWORD || preserve(),
+      INITIAL_INVESTOR_EMAIL: process.env.DORMFLOW_INITIAL_INVESTOR_EMAIL || preserve(),
+      INITIAL_INVESTOR_PASSWORD: process.env.DORMFLOW_INITIAL_INVESTOR_PASSWORD || preserve(),
+      TELEGRAM_BOT_TOKEN: preserve(),
+      TELEGRAM_BOT_USERNAME: preserve(),
+    },
+  });
+
+  // aiogram long-polling worker: no public port, shares the API image and database.
+  const telegramBot = service('dormflow-telegram-bot', {
+    source: github(repo, { branch: 'main', rootDirectory: 'backend' }),
+    deploy: {
+      startCommand: 'python -m app.telegram_bot',
+      restartPolicyType: 'ALWAYS',
+    },
+    env: {
+      DATABASE_URL: db.env.DATABASE_URL,
+      ENVIRONMENT: 'production',
+      TIMEZONE: 'Asia/Tashkent',
+      PUBLIC_APP_URL: 'https://dormflows.netlify.app',
+      FILE_STORAGE_BACKEND: 'postgres',
+      FILE_RETENTION_DAYS: '365',
+      JWT_SECRET: process.env.DORMFLOW_RAILWAY_JWT_SECRET || preserve(),
+      TELEGRAM_BOT_TOKEN: preserve(),
+      TELEGRAM_BOT_USERNAME: preserve(),
     },
   });
 
@@ -49,6 +76,7 @@ export default defineRailway(() => {
       TIMEZONE: 'Asia/Tashkent',
       FILE_STORAGE_BACKEND: 'postgres',
       FILE_RETENTION_DAYS: '365',
+      TELEGRAM_BOT_TOKEN: preserve(),
     },
   });
 
@@ -69,5 +97,5 @@ export default defineRailway(() => {
     },
   });
 
-  return project('DormFlow', { resources: [api, dailyJobs, fileCleanup, db] });
+  return project('DormFlow', { resources: [api, telegramBot, dailyJobs, fileCleanup, db] });
 });

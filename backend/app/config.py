@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     initial_operator_name: str = "Bosh operator"
     timezone: str = "Asia/Tashkent"
     admins_can_adjust_billing: bool = False
+    # Deliberately off by default: finance remains operator-only.  Keeping this
+    # separate from billing-term editing makes the exceptional payment workflow
+    # explicit and easy to review in a deployment configuration.
+    admins_can_record_payments: bool = False
     file_storage_backend: str = "local"
     file_local_directory: str = "./private-files"
     # Safe operational default; deployments can replace this with the approved policy.
@@ -52,6 +56,18 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+    # Optional first ADMIN / INVESTOR accounts, created only when both email and password are set.
+    initial_admin_email: str = ""
+    initial_admin_password: str = ""
+    initial_admin_name: str = "Administrator"
+    initial_investor_email: str = ""
+    initial_investor_password: str = ""
+    initial_investor_name: str = "Investor"
+    # Telegram bot (aiogram long polling worker). The token stays on the server only.
+    telegram_bot_token: str = ""
+    telegram_bot_username: str = ""
+    telegram_poll_seconds: int = Field(default=10, ge=3, le=300)
+    telegram_link_minutes: int = Field(default=10, ge=1, le=60)
 
     @field_validator("openrouter_model")
     @classmethod

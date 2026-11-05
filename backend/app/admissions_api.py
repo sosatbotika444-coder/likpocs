@@ -28,8 +28,9 @@ from app.ai_extraction import (
 )
 from app.billing import create_initial_period
 from app.config import settings
+from app.contract import CONTRACT_VERSION, contract_hash, render_contract
 from app.db import get_db
-from app.dependencies import get_current_user, require_operator
+from app.dependencies import get_current_user, require_operations_staff, require_operator
 from app.file_storage import storage, validate_upload
 from app.models import (
     AdmissionCampaign,
@@ -51,6 +52,8 @@ from app.models import (
     utcnow,
 )
 from app.residency import assert_room_available, record_room_assignment
+from app.services import today_local
+from app.telegram import notify_application_status, notify_staff_of_application, telegram_invitation_link
 from app.schemas import (
     ApplicationApproveIn,
     ApplicationDraftIn,
@@ -64,6 +67,7 @@ from app.schemas import (
     ApplicationStatusIn,
     ApplicationSubmitIn,
     AdmissionSummaryOut,
+    AdmissionSummaryStaffOut,
     CampaignCreate,
     CampaignOut,
     DormitoryCreate,
@@ -73,6 +77,7 @@ from app.schemas import (
     InvitationExchangeIn,
     InvitationOut,
     PageInfo,
+    StaffPageInfo,
     PublicApplicationOut,
     PublicCampaignOut,
     PublicSessionOut,
@@ -104,9 +109,7 @@ def _aware(value: datetime) -> datetime:
 
 
 def _require_staff(user: User) -> User:
-    if user.role not in {"ADMIN", "OPERATOR"}:
-        raise HTTPException(status_code=403, detail="Bu amal uchun ruxsatingiz yo‘q.")
-    return user
+    return require_operations_staff(user)
 
 
 def _rate_limit(db: Session, request: Request, scope: str, limit: int, window_seconds: int) -> None:
@@ -188,6 +191,7 @@ def _event(db: Session, application: StudentApplication, to_status: str, actor: 
         to_status=to_status,
         reason=reason,
     ))
+    notify_application_status(db, application, to_status, reason)
 
 
 def _phone(value: str) -> str:
@@ -452,7 +456,9 @@ def create_invitation(payload: InvitationCreate, db: Session = Depends(get_db), 
     db.commit()
     db.refresh(row)
     link = f"{settings.public_app_base_url}/apply#{raw_token}"
-    return _invite_out(row, link)
+    out = _invite_out(row, link)
+    out.telegram_link = telegram_invitation_link(raw_token)
+    return out
 
 
 @staff_router.post("/admissions/invitations/{invitation_id}/pause", response_model=InvitationOut)
@@ -499,7 +505,7 @@ def revoke_invitation(invitation_id: UUID, db: Session = Depends(get_db), user: 
     return _invite_out(row)
 
 
-@staff_router.get("/admissions/applications", response_model=PageInfo)
+@staff_router.get("/admissions/applications", response_model=PageInfo | StaffPageInfo)
 def list_applications(
     status_filter: str = Query(default="all", alias="status"),
     campaign_id: UUID | None = None,
@@ -532,6 +538,8 @@ def list_applications(
         phone=row.phone, campaign_id=row.campaign_id, dormitory_id=row.dormitory_id,
         assigned_to=row.assigned_to, created_at=row.created_at,
     ) for row in rows]
+    if user.role == "ADMIN":
+        return StaffPageInfo(items=items, count=total, skip=skip, limit=limit)
     return PageInfo(items=items, total=total, skip=skip, limit=limit)
 
 
@@ -591,7 +599,7 @@ def find_application_duplicates(application_id: UUID, db: Session = Depends(get_
     latest_period_by_resident: dict[UUID, BillingPeriod] = {}
     for period in histories:
         latest_period_by_resident.setdefault(period.resident_id, period)
-    return [{
+    matches_out = [{
         "id": resident.id,
         "first_name": resident.first_name,
         "last_name": resident.last_name,
@@ -600,6 +608,9 @@ def find_application_duplicates(application_id: UUID, db: Session = Depends(get_
         "agreed_price": resident.agreed_price if resident.agreed_price is not None else (latest_period_by_resident.get(resident.id).charge_amount if resident.id in latest_period_by_resident else None),
         "payment_period_days": resident.payment_period_days or (latest_period_by_resident.get(resident.id).period_days if resident.id in latest_period_by_resident else None),
     } for resident in matches]
+    if user.role == "ADMIN":
+        return [{key: value for key, value in row.items() if key not in {"agreed_price", "payment_period_days"}} for row in matches_out]
+    return matches_out
 
 
 @staff_router.post("/admissions/applications/{application_id}/request-info", response_model=ApplicationOut)
@@ -693,8 +704,8 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
         .limit(1)
     ))
     existing_terms = bool(latest_billing_period)
-    if payload.agreed_price is not None and user.role != "OPERATOR" and not settings.admins_can_adjust_billing:
-        raise HTTPException(status_code=403, detail="Kelishilgan narxni faqat operator belgilaydi.")
+    if user.role == "ADMIN" and ({"agreed_price", "payment_period_days"} & payload.model_fields_set):
+        raise HTTPException(status_code=403, detail="Tasdiqlash uchun operator yordami kerak.")
     general = db.get(SystemSetting, "general")
     general_values = general.value if general and isinstance(general.value, dict) else {}
     default_period_days = int(general_values.get("default_period_days", 30))
@@ -702,14 +713,17 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
         agreed_price = resident.agreed_price if resident.agreed_price is not None else latest_billing_period.charge_amount
         payment_period_days = resident.payment_period_days or latest_billing_period.period_days or default_period_days
         if payload.agreed_price is not None and payload.agreed_price != agreed_price:
-            raise HTTPException(status_code=409, detail="Mavjud yashovchining tarifini avval Yashovchilar bo‘limida yangilang.")
+            detail = "Tasdiqlash uchun operator yordami kerak." if user.role == "ADMIN" else "Mavjud yashovchining tarifini avval Yashovchilar bo‘limida yangilang."
+            raise HTTPException(status_code=409, detail=detail)
         if payload.payment_period_days is not None and payload.payment_period_days != payment_period_days:
-            raise HTTPException(status_code=409, detail="Mavjud yashovchining to‘lov davrini avval Yashovchilar bo‘limida yangilang.")
+            detail = "Tasdiqlash uchun operator yordami kerak." if user.role == "ADMIN" else "Mavjud yashovchining to‘lov davrini avval Yashovchilar bo‘limida yangilang."
+            raise HTTPException(status_code=409, detail=detail)
     else:
         agreed_price = payload.agreed_price if payload.agreed_price is not None else (resident.agreed_price if resident and resident.agreed_price is not None else room.price)
         payment_period_days = payload.payment_period_days or (resident.payment_period_days if resident and resident.payment_period_days else default_period_days)
         if agreed_price is None or agreed_price < 0:
-            raise HTTPException(status_code=422, detail="Xona narxini belgilang yoki tasdiqlash oynasida yashovchi narxini kiriting.")
+            detail = "Tasdiqlash uchun operator yordami kerak." if user.role == "ADMIN" else "Xona narxini belgilang yoki tasdiqlash oynasida yashovchi narxini kiriting."
+            raise HTTPException(status_code=422, detail=detail)
         if payment_period_days <= 0:
             raise HTTPException(status_code=422, detail="To‘lov davri musbat kunlarda bo‘lishi kerak.")
     assert_room_available(db, room.id, payload.move_in, payload.move_out, exclude_resident_id=resident.id if resident else None)
@@ -743,12 +757,13 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
             payload.move_in + timedelta(days=payment_period_days),
             user,
         )
-        audit(db, user, "BILLING_PERIOD_CREATED_FROM_APPLICATION", "BillingPeriod", billing_period.id, {
+        billing_audit_details = {
             "application_id": str(application.id),
             "resident_id": str(resident.id),
-            "amount": str(billing_period.charge_amount),
-            "period_days": billing_period.period_days,
-        })
+        }
+        if user.role == "OPERATOR":
+            billing_audit_details.update({"amount": str(billing_period.charge_amount), "period_days": billing_period.period_days})
+        audit(db, user, "BILLING_PERIOD_CREATED_FROM_APPLICATION", "BillingPeriod", billing_period.id, billing_audit_details)
     if payload.resident_id is None:
         notify(db, "Yangi yashovchi", f"{resident.first_name} {resident.last_name} arizadan yashovchilar ro'yxatiga qo'shildi.", "RESIDENT", resident.id, user.id)
     application.resident_id = resident.id
@@ -802,8 +817,8 @@ def reissue_tracking_code(application_id: UUID, payload: ApplicationStatusIn, db
     return {"access_code": raw_code}
 
 
-@staff_router.get("/admissions/summary", response_model=AdmissionSummaryOut)
-def admission_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> AdmissionSummaryOut:
+@staff_router.get("/admissions/summary", response_model=AdmissionSummaryOut | AdmissionSummaryStaffOut)
+def admission_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> AdmissionSummaryOut | AdmissionSummaryStaffOut:
     _require_staff(user)
     statuses = ("DRAFT", "SUBMITTED", "IN_REVIEW", "NEEDS_INFO", "APPROVED", "REJECTED", "CANCELLED", "ARCHIVED")
     grouped = db.execute(
@@ -832,6 +847,14 @@ def admission_summary(db: Session = Depends(get_db), user: User = Depends(get_cu
         .where(StudentApplication.status == "APPROVED", StudentApplication.resident_id.is_not(None))
         .distinct()
     ).all())
+    if user.role == "ADMIN":
+        return AdmissionSummaryStaffOut(
+            total_applications=sum(count for status, count in by_status.items() if status != "DRAFT"),
+            applications_this_month=applications_this_month,
+            pending_applications=sum(by_status[status] for status in ("SUBMITTED", "IN_REVIEW", "NEEDS_INFO")),
+            approved_applications=by_status["APPROVED"], approved_this_month=approved_this_month,
+            rejected_applications=by_status["REJECTED"], linked_residents=len(resident_ids), by_status=by_status,
+        )
 
     open_periods = db.scalars(
         select(BillingPeriod).where(
@@ -1274,15 +1297,41 @@ def retry_public_file_extraction(
 def submit_public_application(payload: ApplicationSubmitIn, request: Request, response: Response, db: Session = Depends(get_db), csrf_token: str | None = Header(default=None, alias="X-CSRF-Token")) -> dict[str, str]:
     _rate_limit(db, request, "submit", 30, 3600)
     application, _ = _student_write_session(request, db, csrf_token)
-    application = db.scalar(select(StudentApplication).where(StudentApplication.id == application.id).with_for_update().execution_options(populate_existing=True))
+    return submit_application(
+        db, application.id, via="WEB", consent=payload.consent,
+        contract_accepted=payload.contract_accepted, signature_name=payload.signature_name,
+    )
+
+
+def contract_for_application(application: StudentApplication, *, on: date | None = None) -> dict[str, object]:
+    """Render the lease agreement with the applicant's details (also used by the Telegram bot)."""
+    name = " ".join(part for part in (application.last_name_latin, application.first_name_latin, application.middle_name_latin) if part.strip())
+    return render_contract(reference=application.reference, tenant_name=name, tenant_phone=application.phone, on=on or today_local())
+
+
+def _clean_signature(value: str) -> str:
+    return " ".join(value.split())
+
+
+def submit_application(
+    db: Session, application_id: UUID, *, via: str, consent: bool, contract_accepted: bool, signature_name: str,
+) -> dict[str, str]:
+    """Validate and submit an application; shared by the website and the Telegram bot."""
+    application = db.scalar(select(StudentApplication).where(StudentApplication.id == application_id).with_for_update().execution_options(populate_existing=True))
     if not application:
         raise HTTPException(status_code=404, detail="Ariza topilmadi.")
     if application.status in {"SUBMITTED", "IN_REVIEW"}:
         return {"reference": application.reference, "status": application.status, "access_code": ""}
     if application.status in {"APPROVED", "REJECTED", "CANCELLED", "ARCHIVED"}:
         raise HTTPException(status_code=409, detail="Ariza yakunlangan.")
-    if not payload.consent:
+    if not consent:
         raise HTTPException(status_code=422, detail="Arizani yuborish uchun rozilikni tasdiqlang.")
+    signature = _clean_signature(signature_name)
+    if application.contract_accepted_at is None:
+        if not contract_accepted:
+            raise HTTPException(status_code=422, detail="Arizani yuborishdan oldin ijara shartnomasini o‘qib, qabul qilishingiz shart.")
+        if len(signature) < 5 or len(signature.split()) < 2:
+            raise HTTPException(status_code=422, detail="Shartnomani imzolash uchun ism va familiyangizni to‘liq kiriting.")
     campaign = db.get(AdmissionCampaign, application.campaign_id)
     missing = [name for name, value in {
         "first_name_latin": application.first_name_latin,
@@ -1342,6 +1391,15 @@ def submit_public_application(payload: ApplicationSubmitIn, request: Request, re
         invitation.submission_count += 1
     application.consent_version = campaign.consent_version if campaign else application.consent_version
     application.consented_at = utcnow()
+    if application.contract_accepted_at is None:
+        # Record exactly which wording was accepted and who typed the signature; the text itself is
+        # reproducible from the version/hash, so nothing financial or personal is copied into the audit log.
+        application.contract_version = CONTRACT_VERSION
+        application.contract_hash = contract_hash()
+        application.contract_accepted_at = utcnow()
+        application.contract_signature_name = signature
+        application.contract_signed_via = via
+        audit(db, None, "APPLICATION_CONTRACT_SIGNED", "StudentApplication", application.id, {"contract_version": CONTRACT_VERSION, "via": via})
     application.requested_fields = []
     application.review_reason = ""
     if application.status in {"DRAFT", "NEEDS_INFO"}:
@@ -1351,9 +1409,36 @@ def submit_public_application(payload: ApplicationSubmitIn, request: Request, re
     if first_submission:
         access_code = secrets.token_urlsafe(24)
         application.tracking_code_hash = _digest(access_code)
-    audit(db, None, "APPLICATION_SUBMITTED", "StudentApplication", application.id)
+    audit(db, None, "APPLICATION_SUBMITTED", "StudentApplication", application.id, {"via": via})
+    notify_staff_of_application(db, application)
     db.commit()
     return {"reference": application.reference, "status": application.status, "access_code": access_code}
+
+
+@public_router.get("/application/contract")
+def public_application_contract(request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    """Lease agreement the applicant must read and accept before submitting (session-scoped)."""
+    application, _ = _student_session(request, db)
+    return contract_for_application(application)
+
+
+@staff_router.get("/admissions/applications/{application_id}/contract")
+def staff_application_contract(application_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, object]:
+    """Staff view of the accepted agreement with signature metadata (no document contents)."""
+    _require_staff(user)
+    application = db.get(StudentApplication, application_id)
+    if not application:
+        raise HTTPException(status_code=404, detail="Ariza topilmadi.")
+    accepted_at = application.contract_accepted_at
+    on = _aware(accepted_at).astimezone(ZoneInfo(settings.timezone)).date() if accepted_at else None
+    rendered = contract_for_application(application, on=on)
+    rendered["signed"] = accepted_at is not None
+    rendered["signed_version"] = application.contract_version
+    rendered["signed_hash_matches"] = bool(application.contract_hash) and application.contract_hash == contract_hash()
+    rendered["signature_name"] = application.contract_signature_name
+    rendered["signed_at"] = accepted_at.isoformat() if accepted_at else None
+    rendered["signed_via"] = application.contract_signed_via
+    return rendered
 
 
 @public_router.get("/application/status", response_model=PublicStatusOut)

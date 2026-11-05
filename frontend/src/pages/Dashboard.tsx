@@ -7,6 +7,7 @@ import { api, errorMessage } from '../api';
 import type { Dashboard as DashboardData } from '../types';
 import { formatDate, formatMoney } from '../locales/uz';
 import { PageHeading, Panel } from './shared';
+import { useAuth } from '../auth';
 
 const { Text } = Typography;
 const moneyAxis = (value: number) => new Intl.NumberFormat('uz-UZ', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
@@ -24,6 +25,8 @@ function initials(name: string) {
 }
 
 export default function Dashboard() {
+  const { user } = useAuth();
+  const canViewMoney = Boolean(user?.can_view_money);
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState('');
   useEffect(() => { api.get<DashboardData>('/dashboard').then((r) => setData(r.data)).catch((e) => setError(errorMessage(e))); }, []);
@@ -39,7 +42,7 @@ export default function Dashboard() {
         <Row gutter={[9, 9]} className="dashboard-metrics">
           <Col span={8}><Metric label="Yashovchilar" value={data.residents} note={`${data.rooms} ta faol xona`} icon={<TeamOutlined />} /></Col>
           <Col span={8}><Metric label="Xonalar bandligi" value={`${data.occupancy_rate}%`} note={`${data.available_beds} ta bo‘sh o‘rin`} icon={<HomeOutlined />} tone="metric-green" /></Col>
-          <Col span={8}><Metric label="Joriy oy tushumi" value={formatMoney(data.actual_revenue)} note="Haqiqiy qabul qilingan to‘lovlar" icon={<WalletOutlined />} tone="metric-green" /></Col>
+          {canViewMoney && <Col span={8}><Metric label="Joriy oy tushumi" value={formatMoney(data.actual_revenue)} note="Haqiqiy qabul qilingan to‘lovlar" icon={<WalletOutlined />} tone="metric-green" /></Col>}
         </Row>
 
         <div className="dashboard-chart-grid">
@@ -68,7 +71,7 @@ export default function Dashboard() {
             </ResponsiveContainer></div>
           </Panel>
         </div>
-        <Panel title="Haqiqiy tushum dinamikasi" className="dashboard-chart-panel dashboard-revenue-panel">
+        {canViewMoney && <Panel title="Haqiqiy tushum dinamikasi" className="dashboard-chart-panel dashboard-revenue-panel">
           <div className="chart-box dashboard-chart-box"><ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data.revenue_trend} margin={{ top: 6, right: 5, left: -20, bottom: 0 }}>
               <CartesianGrid vertical={false} stroke="#ecefeb" />
@@ -78,8 +81,8 @@ export default function Dashboard() {
               <Area type="monotone" dataKey="amount" name="Tushum" stroke="#42a47a" strokeWidth={1.8} fill="#e7f3eb" fillOpacity={0.55} activeDot={{ r: 3 }} />
             </AreaChart>
           </ResponsiveContainer></div>
-        </Panel>
-        <div className="dashboard-footnote"><Text type="secondary">Tushum faqat amalda qayd etilgan to‘lovlarni ko‘rsatadi. Barcha summalar so‘mda.</Text></div>
+        </Panel>}
+        {canViewMoney && <div className="dashboard-footnote"><Text type="secondary">Tushum faqat amalda qayd etilgan to‘lovlarni ko‘rsatadi. Barcha summalar so‘mda.</Text></div>}
       </div>}
     </main>
 
@@ -97,7 +100,7 @@ export default function Dashboard() {
         </div>
       </Panel>
 
-      <Panel title="Moliyaviy ko‘rsatkichlar" className="dashboard-side-panel">
+      {canViewMoney && <Panel title="Moliyaviy ko‘rsatkichlar" className="dashboard-side-panel">
         <div className="dashboard-finance-list">
           <div><span>Qarzdorlik</span><strong className="text-danger">{formatMoney(data.outstanding_debt)}</strong></div>
           <div><span>Joriy oy xarajatlari</span><strong>{formatMoney(data.actual_expenses)}</strong></div>
@@ -107,9 +110,9 @@ export default function Dashboard() {
           <div><span>Bugun to‘lanadi</span><strong>{data.due_today} ta</strong></div>
           <div><span>Yaqin 7 kunda</span><strong>{data.due_soon} ta</strong></div>
         </div>
-      </Panel>
+      </Panel>}
 
-      <Panel title="So‘nggi to‘lovlar" extra={<Link to="/payments">Barchasi</Link>} className="dashboard-side-panel">
+      {canViewMoney && <Panel title="So‘nggi to‘lovlar" extra={<Link to="/payments">Barchasi</Link>} className="dashboard-side-panel">
         <div className="payment-mini-list">
           {data.recent_payments.slice(0, 4).map((payment) => <div className="payment-mini" key={payment.id}>
             <span className="payment-mini-avatar">{initials(payment.resident_name)}</span>
@@ -118,7 +121,7 @@ export default function Dashboard() {
           </div>)}
           {!data.recent_payments.length && <div className="dashboard-empty">Hali to‘lovlar yo‘q</div>}
         </div>
-      </Panel>
+      </Panel>}
     </aside>}
   </div>;
 }

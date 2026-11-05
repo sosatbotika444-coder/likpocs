@@ -31,23 +31,25 @@ class UserOut(ORMModel):
     id: UUID
     email: EmailStr
     full_name: str
-    role: Literal["OPERATOR", "ADMIN"]
+    role: Literal["OPERATOR", "ADMIN", "INVESTOR"]
     is_active: bool
     is_primary: bool
     created_at: datetime
+    can_view_money: bool = False
 
 
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=2, max_length=160)
     password: str = Field(min_length=12, max_length=128)
-    role: Literal["ADMIN"] = "ADMIN"
+    role: Literal["ADMIN", "INVESTOR"] = "ADMIN"
 
 
 class UserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=160)
     is_active: bool | None = None
     password: str | None = Field(default=None, min_length=12, max_length=128)
+    role: Literal["ADMIN", "INVESTOR"] | None = None
 
 
 class RoomBase(BaseModel):
@@ -79,6 +81,19 @@ class RoomOut(ORMModel):
     floor: int
     capacity: int
     price: Decimal | None
+    notes: str
+    is_active: bool
+    resident_count: int = 0
+    available_beds: int = 0
+
+
+class RoomStaffOut(BaseModel):
+    """Operations-safe room response: pricing is intentionally absent."""
+    id: UUID
+    dormitory_id: UUID
+    number: str
+    floor: int
+    capacity: int
     notes: str
     is_active: bool
     resident_count: int = 0
@@ -185,6 +200,27 @@ class ResidentOut(ORMModel):
 class ResidentDetail(ResidentOut):
     billing_history: list[BillingPeriodOut] = Field(default_factory=list)
     changes: list[BillingChangeOut] = Field(default_factory=list)
+
+
+class ResidentStaffOut(BaseModel):
+    """ADMIN resident projection. No prices, balances, payment periods or debt state."""
+    id: UUID
+    first_name: str
+    last_name: str
+    phone: str | None
+    telegram_username: str | None
+    room_id: UUID | None
+    room_number: str | None = None
+    check_in_date: date | None
+    departed_on: date | None = None
+    notes: str
+    is_archived: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResidentStaffDetail(ResidentStaffOut):
+    pass
 
 
 class ExtendRequest(BaseModel):
@@ -304,6 +340,14 @@ class PageInfo(BaseModel):
     limit: int
 
 
+class StaffPageInfo(BaseModel):
+    """Page metadata for ADMIN. `count` avoids an ambiguous financial `total` key."""
+    items: list
+    count: int
+    skip: int
+    limit: int
+
+
 class DashboardOut(BaseModel):
     residents: int
     rooms: int
@@ -323,6 +367,33 @@ class DashboardOut(BaseModel):
     recent_residents: list[ResidentOut]
 
 
+class DashboardStaffOut(BaseModel):
+    """ADMIN dashboard projection: occupancy only, never financial signals."""
+    residents: int
+    rooms: int
+    occupancy_rate: float
+    available_beds: int
+    occupancy_by_room: list[dict]
+    recent_residents: list[ResidentStaffOut]
+
+
+class InvestorMonthOut(BaseModel):
+    year: int
+    month: int
+    revenue: Decimal
+    expenses: Decimal
+    net_profit: Decimal
+
+
+class InvestorSummaryOut(BaseModel):
+    revenue: Decimal
+    expenses: Decimal
+    net_profit: Decimal
+    outstanding_debt: Decimal
+    occupancy_rate: float | None = None
+    months: list[InvestorMonthOut]
+
+
 class AdmissionSummaryOut(BaseModel):
     total_applications: int
     applications_this_month: int
@@ -335,6 +406,31 @@ class AdmissionSummaryOut(BaseModel):
     outstanding_debt: Decimal
     actual_revenue_this_month: Decimal
     by_status: dict[str, int]
+
+
+class AdmissionSummaryStaffOut(BaseModel):
+    total_applications: int
+    applications_this_month: int
+    pending_applications: int
+    approved_applications: int
+    approved_this_month: int
+    rejected_applications: int
+    linked_residents: int
+    by_status: dict[str, int]
+
+
+class TelegramStatusOut(BaseModel):
+    configured: bool
+    bot_username: str
+    linked: bool
+    username: str = ""
+
+
+class TelegramLinkCodeOut(BaseModel):
+    code: str
+    expires_at: datetime
+    bot_username: str
+    link: str | None = None
 
 
 class NotificationOut(ORMModel):
@@ -397,7 +493,7 @@ class StaffTaskOut(BaseModel):
 class TaskAssigneeOut(BaseModel):
     id: UUID
     full_name: str
-    role: Literal["OPERATOR", "ADMIN"]
+    role: Literal["OPERATOR", "ADMIN", "INVESTOR"]
 
 
 class SystemSettingsIn(BaseModel):
@@ -526,6 +622,7 @@ class InvitationOut(ORMModel):
     created_at: datetime
     status: str
     link: str | None = None
+    telegram_link: str | None = None
 
 
 class ApplicationDraftIn(BaseModel):
@@ -565,6 +662,8 @@ class ApplicationDraftIn(BaseModel):
 
 class ApplicationSubmitIn(BaseModel):
     consent: bool
+    contract_accepted: bool = False
+    signature_name: str = Field(default="", max_length=200)
 
 
 class PublicApplicationOut(ApplicationDraftIn):
@@ -575,6 +674,7 @@ class PublicApplicationOut(ApplicationDraftIn):
     requested_fields: list[str]
     review_reason: str
     consent_version: str
+    contract_accepted_at: datetime | None = None
 
 
 class ApplicationFileOut(ORMModel):
@@ -609,6 +709,9 @@ class ApplicationOut(PublicApplicationOut):
     resident_id: UUID | None
     assigned_to: UUID | None
     internal_notes: str
+    contract_version: str = ""
+    contract_signature_name: str = ""
+    contract_signed_via: str = ""
     files: list[ApplicationFileStaffOut] = Field(default_factory=list)
     events: list[ApplicationStatusEventOut] = Field(default_factory=list)
     created_at: datetime

@@ -1,0 +1,12 @@
+﻿        result = run_daily_jobs(database, today)
+>       assert result["reminders_created"] == 2
+E       assert 1 == 2
+
+tests\test_notifications.py:19: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_admissions.py::test_admission_approval_creates_resident_billing_and_updates_statistics
+FAILED tests/test_admissions.py::test_approval_links_matching_resident_without_duplicate_billing
+FAILED tests/test_admissions.py::test_approved_application_without_resident_can_be_repaired
+FAILED tests/test_admissions.py::test_room_stay_intervals_reject_overlapping_approvals
+FAILED tests/test_notifications.py::test_notifications_are_created_by_job_and_scoped_per_user
+5 failed, 38 passed in 54.15s

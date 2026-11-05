@@ -15,6 +15,7 @@ Pillow>=11,<13
 PyMuPDF>=1.26,<2.0
 httpx>=0.28,<1.0
 openai
+aiogram>=3.13,<4.0
 
 # Test dependencies
 pytest>=8.4,<9.0

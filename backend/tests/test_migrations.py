@@ -30,6 +30,8 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
     departures = load_revision(root / "alembic" / "versions" / "20261027_01_resident_departures.py")
     ai_extraction = load_revision(root / "alembic" / "versions" / "20261028_01_openrouter_document_extraction.py")
     staff_tasks = load_revision(root / "alembic" / "versions" / "20261030_01_staff_tasks.py")
+    investor = load_revision(root / "alembic" / "versions" / "20261103_01_investor_role.py")
+    contract_telegram = load_revision(root / "alembic" / "versions" / "20261104_01_contract_and_telegram.py")
     engine = create_engine("sqlite://")
     room_id, resident_id = uuid4(), uuid4()
     application_id, application_file_id = uuid4(), uuid4()
@@ -80,12 +82,18 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         ai_extraction.upgrade()
         staff_tasks.op = ops
         staff_tasks.upgrade()
+        investor.op = ops
+        investor.upgrade()
+        contract_telegram.op = ops
+        contract_telegram.upgrade()
         inspector = inspect(connection)
-        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses", "staff_tasks"}
+        expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses", "staff_tasks", "telegram_accounts", "telegram_link_codes", "telegram_outbox"}
         assert expected <= set(inspector.get_table_names())
         file_columns = {column["name"] for column in inspector.get_columns("application_files")}
         assert {"ai_status", "extracted_data"} <= file_columns
         assert not {"ocr_status", "ocr_text", "ocr_truncated"} & file_columns
+        application_columns = {column["name"] for column in inspector.get_columns("student_applications")}
+        assert {"contract_version", "contract_hash", "contract_accepted_at", "contract_signature_name", "contract_signed_via"} <= application_columns
         ai_backfill = connection.exec_driver_sql(
             "SELECT ai_status, extracted_data FROM application_files WHERE id = ?",
             (application_file_id.hex,),
@@ -100,6 +108,8 @@ def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
         assert period[0] == resident_id.hex
         assert period[2] == "2026-01-10"
         assert period[3] is None
+        contract_telegram.downgrade()
+        investor.downgrade()
         staff_tasks.downgrade()
         assert "staff_tasks" not in set(inspect(connection).get_table_names())
         ai_extraction.downgrade()

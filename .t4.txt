@@ -1,0 +1,2 @@
+﻿WARNING: Package(s) not found: aiogram
+Python 3.12.10

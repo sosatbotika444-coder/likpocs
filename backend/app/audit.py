@@ -29,6 +29,11 @@ def audit(
 def notify(db: Session, title: str, message: str, kind: str = "INFO", entity_id: UUID | None = None, user_id: UUID | None = None) -> Notification:
     item = Notification(title=title, message=message, kind=kind, entity_id=entity_id, user_id=user_id)
     db.add(item)
+    if user_id is not None:
+        # Imported lazily: telegram.py depends on this module for staff-wide alerts.
+        from app.telegram import mirror_notification
+
+        mirror_notification(db, item)
     return item
 
 

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.billing import current_period, period_balance, period_paid
 from app.config import settings
 from app.models import AuditEvent, BillingChange, BillingPeriod, Expense, Notification, Payment, PaymentAdjustment, Resident, ResidencePeriod, Room, User
-from app.schemas import AuditEventOut, BillingChangeOut, BillingPeriodOut, ExpenseOut, NotificationOut, PaymentOut, ResidentDetail, ResidentOut, RoomOut
+from app.schemas import AuditEventOut, BillingChangeOut, BillingPeriodOut, ExpenseOut, NotificationOut, PaymentOut, ResidentDetail, ResidentOut, ResidentStaffDetail, ResidentStaffOut, RoomOut, RoomStaffOut, UserOut
 
 
 def today_local() -> date:
@@ -44,6 +44,12 @@ def room_out(db: Session, room: Room) -> RoomOut:
         resident_count=resident_count,
         available_beds=max(0, room.capacity - resident_count),
     )
+
+
+def room_staff_out(db: Session, room: Room) -> RoomStaffOut:
+    """Project a room for ADMIN without loading pricing into the JSON response."""
+    value = room_out(db, room)
+    return RoomStaffOut(**value.model_dump(exclude={"price"}))
 
 
 def period_out(db: Session, period: BillingPeriod) -> BillingPeriodOut:
@@ -144,6 +150,27 @@ def resident_detail(db: Session, resident: Resident) -> ResidentDetail:
     )
 
 
+def resident_staff_out(db: Session, resident: Resident, as_of: date | None = None) -> ResidentStaffOut:
+    """Project resident operations data without any billing, payment or debt fields."""
+    value = resident_out(db, resident, as_of)
+    return ResidentStaffOut(**value.model_dump(exclude={
+        "payment_period_days", "agreed_price", "billing_start", "billing_end", "billing_period_id",
+        "billing_status", "paid_amount", "balance", "overdue_days",
+    }))
+
+
+def resident_staff_detail(db: Session, resident: Resident) -> ResidentStaffDetail:
+    return ResidentStaffDetail(**resident_staff_out(db, resident).model_dump())
+
+
+def user_out(user: User) -> UserOut:
+    return UserOut(
+        id=user.id, email=user.email, full_name=user.full_name, role=user.role,
+        is_active=user.is_active, is_primary=user.is_primary, created_at=user.created_at,
+        can_view_money=user.role == "OPERATOR",
+    )
+
+
 def payment_out(db: Session, payment: Payment) -> PaymentOut:
     adjustments = db.scalars(select(PaymentAdjustment).where(PaymentAdjustment.payment_id == payment.id)).all()
     net = payment.amount + sum((item.amount_delta for item in adjustments), Decimal("0"))
@@ -168,6 +195,13 @@ def payment_out(db: Session, payment: Payment) -> PaymentOut:
 
 def notification_out(item: Notification) -> NotificationOut:
     return NotificationOut.model_validate(item)
+
+
+def notification_staff_out(item: Notification) -> NotificationOut | None:
+    """ADMIN never receives financial reminders or payment confirmation text."""
+    if item.kind in {"PAYMENT", "BILLING", "DUE_TODAY", "DUE_SOON", "OVERDUE"}:
+        return None
+    return notification_out(item)
 
 
 def expense_out(db: Session, expense: Expense) -> ExpenseOut:

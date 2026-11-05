@@ -24,6 +24,7 @@ const Landing = lazy(() => import('./pages/Landing'));
 const Admissions = lazy(() => import('./pages/Admissions'));
 const AdminGuide = lazy(() => import('./pages/AdminGuide'));
 const Tasks = lazy(() => import('./pages/Tasks'));
+const Investor = lazy(() => import('./pages/Investor'));
 const ALERT_POLL_MS = 60_000;
 const PublicApplication = lazy(async () => {
   const module = await import('./pages/Admissions');
@@ -36,6 +37,7 @@ const routeTitles: Record<string, string> = {
   '/app': uz.nav.dashboard, '/residents': uz.nav.residents, '/rooms': uz.nav.rooms,
   '/payments': uz.nav.payments, '/expenses': uz.nav.expenses, '/reports': uz.nav.reports, '/settings': uz.nav.settings,
   '/admissions': uz.nav.admissions, '/tasks': uz.nav.tasks, '/guide': 'Administrator uchun qo‘llanma',
+  '/investor': uz.nav.investor,
 };
 
 function Login() {
@@ -51,13 +53,13 @@ function Login() {
     try {
       await login(String(form.get('email')), String(form.get('password')));
       const destination = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
-      navigate(destination || '/app', { replace: true });
+      navigate(destination || (user?.role === 'INVESTOR' ? '/investor' : '/app'), { replace: true });
     } catch (error) {
       notice.error({ message: 'Tizimga kirib bo‘lmadi', description: errorMessage(error), placement: 'topRight' });
     } finally { setBusy(false); }
   };
   if (loading) return <div className="auth-loading"><Spin size="large" /></div>;
-  if (user) return <Navigate to="/app" replace />;
+  if (user) return <Navigate to={user.role === 'INVESTOR' ? '/investor' : '/app'} replace />;
   return <main className="login-page">
     {contextHolder}
     <section className="login-art">
@@ -91,6 +93,7 @@ function Shell() {
 
   // GET-only polling: reads the signed-in user's unread notifications and chimes on new ones.
   const loadAlerts = useCallback(async (silent = false) => {
+    if (user?.role === 'INVESTOR') { setAlerts([]); return; }
     try {
       const items = (await api.get<AppNotification[]>('/notifications')).data;
       const seen = knownAlerts.current;
@@ -100,7 +103,7 @@ function Shell() {
     } catch (error) {
       if (!silent) notice.error({ message: 'Bildirishnomalarni yuklab bo‘lmadi', description: errorMessage(error) });
     }
-  }, [notice]);
+  }, [notice, user?.role]);
   useEffect(() => {
     void loadAlerts();
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void loadAlerts(true); }, ALERT_POLL_MS);
@@ -115,14 +118,19 @@ function Shell() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const menuItems = useMemo(() => [
+  const menuItems = useMemo(() => user?.role === 'INVESTOR' ? [
+    { key: '/investor', icon: <DollarCircleOutlined />, label: uz.nav.investor },
+    { key: '/settings', icon: <SettingOutlined />, label: 'Telegram' },
+  ] : [
     { key: '/app', icon: <AppstoreOutlined />, label: uz.nav.dashboard },
     { key: '/tasks', icon: <CheckSquareOutlined />, label: uz.nav.tasks },
     { key: '/residents', icon: <TeamOutlined />, label: uz.nav.residents },
     { key: '/rooms', icon: <HomeOutlined />, label: uz.nav.rooms },
     { key: '/admissions', icon: <SolutionOutlined />, label: uz.nav.admissions },
-    { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
-    { key: '/expenses', icon: <DollarCircleOutlined />, label: uz.nav.expenses },
+    ...(user?.can_view_money ? [
+      { key: '/payments', icon: <WalletOutlined />, label: uz.nav.payments },
+      { key: '/expenses', icon: <DollarCircleOutlined />, label: uz.nav.expenses },
+    ] : []),
     { key: '/reports', icon: <FileExcelOutlined />, label: uz.nav.reports },
     { key: '/guide', icon: <QuestionCircleOutlined />, label: 'Qo‘llanma' },
     { type: 'divider' as const },
@@ -131,7 +139,7 @@ function Shell() {
       { key: '/settings/users', icon: <UserOutlined />, label: uz.nav.users },
       { key: '/settings/audit', icon: <AuditOutlined />, label: uz.nav.audit },
     ] : []),
-  ], [user?.role]);
+  ], [user?.can_view_money, user?.role]);
 
   const sidebar = <>
     <Link className="brand" to="/" onClick={() => setDrawer(false)}><span className="brand-symbol"><HomeOutlined /></span><span className="brand-name">RS <span>Best Hostel</span><small>{uz.brand.subtitle}</small></span></Link>
@@ -173,7 +181,7 @@ function Shell() {
           <button type="button" className="palette-trigger" onClick={() => setPaletteOpen(true)} aria-label={uz.palette.open}><SearchOutlined /><span>{uz.palette.open}</span><kbd>{uz.palette.hint}</kbd></button>
           <Tooltip title={sound ? uz.sound.on : uz.sound.off}><Button type="text" className="sound-trigger" aria-label={sound ? uz.palette.soundOff : uz.palette.soundOn} icon={sound ? <SoundOutlined /> : <MutedOutlined />} onClick={() => setSoundEnabled(!sound)} /></Tooltip>
           <Text className="header-date">{new Intl.DateTimeFormat('uz-UZ',{weekday:'short',day:'numeric',month:'short',timeZone:'Asia/Tashkent'}).format(new Date())}</Text>
-          <Dropdown menu={notificationMenu} trigger={['click']} placement="bottomRight"><Button type="text" className="notification-trigger" aria-label="Bildirishnomalar"><Badge dot={alerts.length > 0}><BellOutlined/></Badge></Button></Dropdown>
+          {user?.role !== 'INVESTOR' && <Dropdown menu={notificationMenu} trigger={['click']} placement="bottomRight"><Button type="text" className="notification-trigger" aria-label="Bildirishnomalar"><Badge dot={alerts.length > 0}><BellOutlined/></Badge></Button></Dropdown>}
           <span className="header-divider"/><Dropdown menu={{items:[{key:'profile',label:'Hisob ma’lumotlari',icon:<UserOutlined/>,onClick:()=>navigate('/settings')},{key:'logout',label:'Tizimdan chiqish',icon:<LogoutOutlined/>,onClick:logout}]}} trigger={['click']}><Button type="text" className="profile-trigger"><Avatar size={30}>{initials}</Avatar><span className="profile-name">{user?.full_name}</span></Button></Dropdown>
         </div>
       </Header>
@@ -194,7 +202,7 @@ function Protected() {
 function Home() {
   const { user, loading } = useAuth();
   if (loading) return <div className="auth-loading"><Spin size="large" /></div>;
-  return user ? <Navigate to="/app" replace /> : <Landing />;
+  return user ? <Navigate to={user.role === 'INVESTOR' ? '/investor' : '/app'} replace /> : <Landing />;
 }
 
 function OperatorOnly({ children }: { children: ReactNode }) {
@@ -203,24 +211,35 @@ function OperatorOnly({ children }: { children: ReactNode }) {
   return children;
 }
 
+function OperationsOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  return user?.role === 'INVESTOR' ? <Navigate to="/investor" replace/> : children;
+}
+
+function InvestorOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  return user?.role === 'ADMIN' ? <Navigate to="/app" replace/> : children;
+}
+
 export default function App() {
   return <Suspense fallback={<div className="auth-loading"><Spin size="large" /></div>}><Routes>
     <Route path="/" element={<Home/>}/>
     <Route path="/login" element={<Login/>}/>
     <Route path="/apply" element={<PublicApplication/>}/>
     <Route element={<Protected/>}>
-      <Route path="/app" element={<Dashboard/>}/>
-      <Route path="/residents" element={<Residents/>}/>
-      <Route path="/rooms" element={<Rooms/>}/>
-      <Route path="/admissions" element={<Admissions/>}/>
-      <Route path="/tasks" element={<Tasks/>}/>
-      <Route path="/guide" element={<AdminGuide/>}/>
-      <Route path="/payments" element={<Payments/>}/>
-      <Route path="/expenses" element={<Expenses/>}/>
-      <Route path="/reports" element={<Reports/>}/>
+      <Route path="/investor" element={<InvestorOnly><Investor/></InvestorOnly>}/>
+      <Route path="/app" element={<OperationsOnly><Dashboard/></OperationsOnly>}/>
+      <Route path="/residents" element={<OperationsOnly><Residents/></OperationsOnly>}/>
+      <Route path="/rooms" element={<OperationsOnly><Rooms/></OperationsOnly>}/>
+      <Route path="/admissions" element={<OperationsOnly><Admissions/></OperationsOnly>}/>
+      <Route path="/tasks" element={<OperationsOnly><Tasks/></OperationsOnly>}/>
+      <Route path="/guide" element={<OperationsOnly><AdminGuide/></OperationsOnly>}/>
+      <Route path="/payments" element={<OperationsOnly><Payments/></OperationsOnly>}/>
+      <Route path="/expenses" element={<OperationsOnly><Expenses/></OperationsOnly>}/>
+      <Route path="/reports" element={<OperationsOnly><Reports/></OperationsOnly>}/>
       <Route path="/settings" element={<SettingsPage/>}/>
-      <Route path="/settings/users" element={<OperatorOnly><SettingsPage initialTab="users"/></OperatorOnly>}/>
-      <Route path="/settings/audit" element={<OperatorOnly><SettingsPage initialTab="audit"/></OperatorOnly>}/>
+      <Route path="/settings/users" element={<OperationsOnly><OperatorOnly><SettingsPage initialTab="users"/></OperatorOnly></OperationsOnly>}/>
+      <Route path="/settings/audit" element={<OperationsOnly><OperatorOnly><SettingsPage initialTab="audit"/></OperatorOnly></OperationsOnly>}/>
     </Route>
     <Route path="*" element={<Navigate to="/" replace/>}/>
   </Routes></Suspense>;

@@ -6,8 +6,10 @@ import { useNavigate } from 'react-router-dom';
 import { api, errorMessage } from '../api';
 import { formatDate, formatMoney } from '../locales/uz';
 import { useAuth } from '../auth';
-import type { AdmissionSettings, AdmissionSummary, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicApplicationFile, PublicCampaign, Room } from '../types';
+import type { Contract, StaffContract, AdmissionSettings, AdmissionSummary, Application, ApplicationFile, ApplicationQueueItem, Campaign, CustomField, Dormitory, Invitation, Page, PublicApplication, PublicApplicationFile, PublicCampaign, Room } from '../types';
 import { Actions, EmptyBlock, PageHeading, Panel } from './shared';
+import ContractView from './ContractView';
+import { uz } from '../locales/uz';
 
 const { Text } = Typography;
 const statusLabels: Record<string, string> = {
@@ -73,6 +75,7 @@ const dataLabels: Record<string, string> = {
   photo: 'Yashovchi surati', additional_data: 'Qo‘shimcha ma’lumot',
 };
 const copyText = async (value: string) => { await navigator.clipboard.writeText(value); };
+const contractSigned = (value: unknown) => Boolean(value);
 const isoDate = (value: Dayjs | string | null | undefined): string | null => value && dayjs.isDayjs(value) ? value.format('YYYY-MM-DD') : value ? String(value).slice(0, 10) : null;
 const publicDateFields = ['birth_date', 'study_start', 'study_end', 'requested_move_in', 'requested_move_out'];
 
@@ -104,6 +107,8 @@ function PublicIntake() {
   const [autofilledFields, setAutofilledFields] = useState<string[]>([]);
   const [aiProcessingConsent, setAIProcessingConsent] = useState(false);
   const [externalAIConsent, setExternalAIConsent] = useState(false);
+  const [contract, setContract] = useState<Contract | null>(null);
+  const [contractRead, setContractRead] = useState(false);
   const exchangeStarted = useRef(false);
   const isClarification = application?.status === 'NEEDS_INFO';
 
@@ -268,11 +273,17 @@ function PublicIntake() {
     }
   }, [files]);
 
+  const loadContract = async () => {
+    try { setContract((await api.get<Contract>('/public/application/contract')).data); }
+    catch (error) { notice.error({ message: 'Shartnomani yuklab bo‘lmadi', description: errorMessage(error) }); }
+  };
+
   const next = async () => {
     setBusy(true);
     try {
       await form.validateFields(step === 0 ? ['first_name_latin', 'last_name_latin', 'birth_date', 'phone'] : ['institution', 'requested_move_in']);
       await saveDraft(isClarification ? application?.requested_fields : undefined);
+      if (step === 1) await loadContract();
       setStep((current) => Math.min(2, current + 1));
     } catch (error) { if (error instanceof Error && !('errorFields' in error)) notice.error({ message: 'Qoralama saqlanmadi', description: errorMessage(error) }); }
     finally { setBusy(false); }
@@ -320,7 +331,7 @@ function PublicIntake() {
       const changed = payloadFrom(values, isClarification ? application?.requested_fields : undefined);
       if (isClarification && Object.keys(changed).length) await api.post('/public/application/respond', changed, { headers: { 'X-CSRF-Token': csrf } });
       else await saveDraft();
-      const result = await api.post<{ reference: string; status: string; access_code: string }>('/public/application/submit', { consent: isClarification || values.consent === true }, { headers: { 'X-CSRF-Token': csrf } });
+      const result = await api.post<{ reference: string; status: string; access_code: string }>('/public/application/submit', { consent: isClarification || values.consent === true, contract_accepted: contractSigned(application?.contract_accepted_at) || values.contract_accepted === true, signature_name: String(values.signature_name ?? '') }, { headers: { 'X-CSRF-Token': csrf } });
       setApplication((current) => current ? { ...current, status: result.data.status } : current);
       setAccessCode(result.data.access_code || '');
       sessionStorage.removeItem('dormflow.public.draft-key');
@@ -380,7 +391,7 @@ function PublicIntake() {
           <Form.Item name="emergency_name" label="Favqulodda aloqa uchun yaqin inson"><Input maxLength={160}/></Form.Item><Form.Item name="emergency_phone" label="Favqulodda telefon"><Input type="tel" maxLength={40}/></Form.Item>
         </div></>}
         {step === 1 && <div className="form-grid"><Form.Item name="institution" label="Ta’lim muassasasi" rules={[{required:true,message:'Ta’lim muassasasini kiriting.'}]}><Input maxLength={200}/></Form.Item><Form.Item name="faculty" label="Fakultet yoki yo‘nalish"><Input maxLength={160}/></Form.Item><Form.Item name="course" label="Kurs"><Input maxLength={40}/></Form.Item><Form.Item name="study_group" label="Guruh"><Input maxLength={80}/></Form.Item><Form.Item name="study_start" label="O‘qish davri boshlanishi"><DatePicker className="full-width"/></Form.Item><Form.Item name="study_end" label="O‘qish davri tugashi"><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_in" label="Ko‘chib kirish sanasi" rules={[{required:true,message:'Taxminiy sanani kiriting.'}]}><DatePicker className="full-width"/></Form.Item><Form.Item name="requested_move_out" label="Ko‘chib chiqish sanasi"><DatePicker className="full-width"/></Form.Item><Form.Item name="preferences" label="Joylashish bo‘yicha istaklar" className="form-span"><Input.TextArea rows={3} maxLength={2000}/></Form.Item>{customFields.map((field) => <Form.Item key={field.key} name={field.key} label={field.label} valuePropName={field.kind === 'checkbox' ? 'checked' : 'value'} rules={field.required ? [field.kind === 'checkbox' ? {validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Ushbu maydonni belgilang.'))} : {required:true}] : []}>{field.kind === 'select' ? <Select options={field.options.map((option)=>({value:option,label:option}))}/> : field.kind === 'checkbox' ? <Checkbox/> : field.kind === 'date' ? <DatePicker className="full-width"/> : <Input/>}</Form.Item>)}</div>}
-        {step === 2 && <><Alert type="info" showIcon message="Hujjatdan ayrim maydonlar to’ldirilishi mumkin" description="Topilgan ma’lumotlarni hujjat bilan solishtiring. Ariza avtomatik tasdiqlanmaydi."/>{aiConsentControl}<h2>Surat va hujjatlar</h2>{fileButtons(false)}<Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
+        {step === 2 && <><Alert type="info" showIcon message="Hujjatdan ayrim maydonlar to’ldirilishi mumkin" description="Topilgan ma’lumotlarni hujjat bilan solishtiring. Ariza avtomatik tasdiqlanmaydi."/>{aiConsentControl}<h2>Surat va hujjatlar</h2>{fileButtons(false)}<h2>{uz.contract.title}</h2><p className="muted">{uz.contract.intro}</p>{contract ? <ContractView contract={contract} onReadAll={() => setContractRead(true)}/> : <Spin/>}<Form.Item name="contract_accepted" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error(uz.contract.mustAccept))}]}><Checkbox disabled={!contractRead}>{uz.contract.accept}</Checkbox></Form.Item><Form.Item name="signature_name" label={uz.contract.signature} rules={[{validator:(_, value)=>String(value ?? '').trim().split(/\s+/).filter(Boolean).length >= 2 ? Promise.resolve() : Promise.reject(new Error(uz.contract.signatureMissing))}]}><Input maxLength={200} autoComplete="name" disabled={!contractRead}/></Form.Item><Form.Item name="consent" valuePropName="checked" rules={[{validator:(_, value)=>value ? Promise.resolve() : Promise.reject(new Error('Rozilikni tasdiqlang.'))}]}><Checkbox>{campaign.consent_text} - {campaign.consent_version}</Checkbox></Form.Item></>}
       </>}
       <div className="public-form-actions">{step > 0 && !isClarification && <Button onClick={() => setStep((current)=>Math.max(0,current-1))}>Orqaga</Button>}{step < 2 && !isClarification ? <Button type="primary" onClick={() => void next()} loading={busy}>Saqlash va davom etish</Button> : <Button type="primary" htmlType="submit" loading={busy}>{isClarification ? 'Javobni yuborish' : 'Arizani yuborish'}</Button>}</div>
     </Form>
@@ -415,6 +426,9 @@ function StaffAdmissions() {
   const [dormOpen, setDormOpen] = useState(false);
   const [editingDormitory, setEditingDormitory] = useState<string | null>(null);
   const [link, setLink] = useState('');
+  const [telegramLink, setTelegramLink] = useState('');
+  const [staffContract, setStaffContract] = useState<StaffContract | null>(null);
+  const [contractOpen, setContractOpen] = useState(false);
   const [actionKind, setActionKind] = useState<'info'|'approve'|'reject'|null>(null);
   const [campaignForm] = Form.useForm<CampaignFormValues>();
   const [inviteForm] = Form.useForm<Record<string, unknown>>();
@@ -454,7 +468,7 @@ function StaffAdmissions() {
     setBusy(true);
     try {
       const result = await api.post<Invitation>('/admissions/invitations', { campaign_id: values.campaign_id, expires_at: (values.expires_at as Dayjs).toISOString(), max_submissions: values.max_submissions });
-      setLink(result.data.link || ''); setInviteOpen(false); inviteForm.resetFields(); await loadLists();
+      setLink(result.data.link || ''); setTelegramLink(result.data.telegram_link || ''); setInviteOpen(false); inviteForm.resetFields(); await loadLists();
     } catch (error) { notice.error({message:'Taklif yaratilmadi',description:errorMessage(error)}); }
     finally { setBusy(false); }
   };
@@ -588,6 +602,7 @@ function StaffAdmissions() {
         {key:'address',label:'Manzil',children:detail.address||'—'},{key:'emergency',label:'Favqulodda aloqa',children:`${detail.emergency_name||'—'} · ${detail.emergency_phone||'—'}`},
         {key:'school',label:'Ta’lim',children:`${detail.institution}${detail.faculty?` · ${detail.faculty}`:''}`},{key:'course',label:'Kurs va guruh',children:`${detail.course||'—'} · ${detail.study_group||'—'}`},
         {key:'stay',label:'So‘ralgan muddat',children:`${formatDate(detail.requested_move_in,true)} — ${formatDate(detail.requested_move_out,true)}`},{key:'consent',label:'Rozilik',children:detail.consent_version||'—'},
+        {key:'contract',label:uz.contract.title,children:detail.contract_signature_name?<Space><Tag color="green">{detail.contract_signature_name}</Tag><Button size="small" onClick={()=>void api.get<StaffContract>(`/admissions/applications/${detail.id}/contract`).then((result)=>{setStaffContract(result.data);setContractOpen(true);}).catch((error:unknown)=>notice.error({message:errorMessage(error)}))}>{uz.contract.download}</Button></Space>:<Tag>{uz.contract.unsigned}</Tag>},
         ...Object.entries(detail.additional_data||{}).map(([key,value])=>({key:`extra-${key}`,label:campaigns.flatMap((item)=>item.custom_fields).find((field)=>field.key===key)?.label||key,children:String(value??'—')})),
       ]}/>
       <Panel title="Surat va hujjatlar"><Table rowKey="id" size="small" pagination={false} dataSource={detail.files} columns={fileColumns} locale={{emptyText:'Biriktirilgan fayl yo‘q'}}/></Panel>
@@ -598,7 +613,8 @@ function StaffAdmissions() {
       </div>}
     </Drawer>
     <Modal open={inviteOpen} title="Cheklangan taklif yaratish" onCancel={()=>setInviteOpen(false)} onOk={()=>inviteForm.submit()} confirmLoading={busy} okText="Havola yaratish" cancelText="Bekor qilish" destroyOnClose><Form form={inviteForm} layout="vertical" onFinish={createInvite}><Form.Item name="campaign_id" label="Kampaniya" rules={[{required:true}]}><Select options={campaigns.filter((item)=>item.status==='ACTIVE').map((item)=>({value:item.id,label:`${item.name} · ${dormitories.find((dorm)=>dorm.id===item.dormitory_id)?.name||''}`}))}/></Form.Item><Form.Item name="expires_at" label="Havola amal qilish muddati" rules={[{required:true}]}><DatePicker showTime className="full-width"/></Form.Item><Form.Item name="max_submissions" label="Arizalar limiti" rules={[{required:true}]}><InputNumber min={1} max={10000} className="full-width"/></Form.Item></Form></Modal>
-    <Modal open={Boolean(link)} title="Yangi taklif havolasi" onCancel={()=>setLink('')} footer={<Button type="primary" onClick={()=>void copyText(link).then(()=>notice.success({message:'Havola nusxalandi.'}))}>Havolani nusxalash</Button>}><Alert type="warning" showIcon message="Havola faqat shu oynada ko‘rsatiladi. Uni talabaga xavfsiz yuboring."/><Input readOnly value={link} className="link-field"/></Modal>
+    <Modal open={Boolean(link)} title="Yangi taklif havolasi" onCancel={()=>setLink('')} footer={<Button type="primary" onClick={()=>void copyText(link).then(()=>notice.success({message:'Havola nusxalandi.'}))}>Havolani nusxalash</Button>}><Alert type="warning" showIcon message="Havola faqat shu oynada ko‘rsatiladi. Uni talabaga xavfsiz yuboring."/><Input readOnly value={link} className="link-field"/>{telegramLink && <><p style={{marginTop:12}}>Telegram bot orqali ariza havolasi:</p><Input readOnly value={telegramLink} className="link-field" addonAfter={<a onClick={()=>void copyText(telegramLink).then(()=>notice.success({message:'Telegram havolasi nusxalandi.'}))}>Nusxalash</a>}/></>}</Modal>
+    <Modal open={contractOpen} title={uz.contract.staffTitle} onCancel={()=>setContractOpen(false)} footer={null} width={760}>{staffContract && <><Descriptions size="small" column={1} items={[{key:'who',label:uz.contract.signedBy,children:staffContract.signature_name||uz.contract.unsigned},{key:'at',label:uz.contract.signedAt,children:staffContract.signed_at?new Intl.DateTimeFormat('uz-UZ',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Tashkent'}).format(new Date(staffContract.signed_at)):'—'},{key:'via',label:uz.contract.channel,children:staffContract.signed_via==='TELEGRAM'?uz.contract.telegram:staffContract.signed_via?uz.contract.web:'—'},{key:'ver',label:uz.contract.version,children:staffContract.signed_version||'—'}]}/>{staffContract.signed&&!staffContract.signed_hash_matches&&<Alert type="warning" showIcon message={uz.contract.changed} style={{margin:'8px 0'}}/>}<ContractView contract={staffContract}/></>}</Modal>
     <Modal open={campaignOpen} title="Qabul kampaniyasi" onCancel={()=>setCampaignOpen(false)} onOk={()=>campaignForm.submit()} confirmLoading={busy} okText="Yaratish" cancelText="Bekor qilish" width={640} destroyOnClose><Form form={campaignForm} layout="vertical" onFinish={createCampaign}><Form.Item name="name" label="Kampaniya nomi" rules={[{required:true}]}><Input maxLength={160}/></Form.Item><Form.Item name="dormitory_id" label="Yotoqxona" rules={[{required:true}]}><Select options={dormitories.filter((item)=>item.is_active).map((item)=>({value:item.id,label:item.name}))}/></Form.Item><Form.Item name="document_types" label="Talab qilinadigan hujjatlar" rules={[{required:true}]}><Select mode="tags" options={[{value:'ID',label:'Pasport yoki ID'},{value:'STUDY_PROOF',label:'O‘qish joyidan ma’lumotnoma'}]}/></Form.Item><Form.Item name="consent_version" label="Rozilik matni versiyasi" rules={[{required:true}]}><Input maxLength={40}/></Form.Item><Form.Item name="consent_text" label="Rozilik matni" rules={[{required:true}]}><Input.TextArea rows={3}/></Form.Item><Form.List name="custom_fields">{(fields,{add,remove})=><><Text strong>Qo‘shimcha maydonlar</Text>{fields.map(({key,name,...rest})=><div className="custom-field-row" key={key}><Form.Item {...rest} name={[name,'key']} rules={[{required:true}]}><Input placeholder="kalit_lowercase"/></Form.Item><Form.Item {...rest} name={[name,'label']} rules={[{required:true}]}><Input placeholder="Maydon nomi"/></Form.Item><Form.Item {...rest} name={[name,'kind']} rules={[{required:true}]}><Select options={['text','date','select','checkbox'].map((value)=>({value,label:value}))}/></Form.Item><Form.Item {...rest} name={[name,'options']} label="Tanlov variantlari"><Select mode="tags" tokenSeparators={[',']}/></Form.Item><Form.Item {...rest} name={[name,'required']} valuePropName="checked"><Checkbox>Shart</Checkbox></Form.Item><Button danger onClick={()=>remove(name)}>O‘chirish</Button></div>)}<Button icon={<PlusOutlined/>} onClick={()=>add({kind:'text',required:false})}>Maydon qo‘shish</Button></>}</Form.List></Form></Modal>
     <Modal open={dormOpen} title={editingDormitory ? "Yotoqxonani tahrirlash" : "Yangi yotoqxona"} onCancel={()=>setDormOpen(false)} onOk={()=>dormForm.submit()} okText="Saqlash" cancelText="Bekor qilish"><Form form={dormForm} layout="vertical" onFinish={saveDormitory}><Form.Item name="name" label="Nomi" rules={[{required:true}]}><Input maxLength={160}/></Form.Item><Form.Item name="address" label="Manzil"><Input maxLength={500}/></Form.Item></Form></Modal>
     <Modal open={Boolean(actionKind)} title={actionKind==='info'?'Talabadan aniqlik so‘rash':actionKind==='approve'?detail?.status==='APPROVED'&&!detail.resident_id?'Tasdiqlangan arizaga yashovchi bog‘lash':'Arizani tasdiqlash':'Arizani rad etish'} onCancel={()=>{setActionKind(null);actionForm.resetFields();}} onOk={()=>actionForm.submit()} confirmLoading={busy} okText={actionKind==='approve'&&detail?.status==='APPROVED'&&!detail.resident_id?'Yashovchini bog‘lash':'Tasdiqlash'} cancelText="Bekor qilish" destroyOnClose>

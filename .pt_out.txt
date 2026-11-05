@@ -1,0 +1,310 @@
+F.FF............................FF...............                        [100%]
+================================== FAILURES ===================================
+___ test_admission_approval_creates_resident_billing_and_updates_statistics ___
+
+client = <starlette.testclient.TestClient object at 0x0000021E3F968EC0>
+database = <sqlalchemy.orm.session.Session object at 0x0000021E3FA685F0>
+operator_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkMTRkYTVmZS03MmYyLTQ3OWEtYjEwMy0zYmRmMWU2MmQzMTYiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjY5LCJleHAiOjE3OTM4MTg0Njl9.R9TKh57cYX7cO0l42qtpWtVYOpTRdFxyox-eSUQbjmA'
+admin_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNmI2ZjE4Ni1mMDBiLTQ0ZDgtOGM5NC05MWY1ZmUyODZlNDQiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjcwLCJleHAiOjE3OTM4MTg0NzB9.tX4Rmre4cGjITNHhuTpGbT686jV7ubxXGm7Kcv-nC34'
+tmp_path = WindowsPath('C:/Users/user/AppData/Local/Temp/pytest-of-user/pytest-55/test_admission_approval_create0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021E3FB407A0>
+
+    def test_admission_approval_creates_resident_billing_and_updates_statistics(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+        monkeypatch.setattr(settings, "file_retention_days", 30)
+        dormitory, _, invitation, raw_invite, public_session = _workflow(client, operator_token, admin_token)
+    
+        _fill_application(client, public_session)
+        submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert submitted.status_code == 200, submitted.text
+        first_result = submitted.json()
+        assert first_result["access_code"]
+        assert raw_invite not in str(database.query(AdmissionInvitation).first().token_hash)
+    
+        retry = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert retry.status_code == 200, retry.text
+        assert retry.json()["reference"] == first_result["reference"]
+        assert retry.json()["access_code"] == ""
+    
+        application = database.scalar(select(StudentApplication).where(StudentApplication.reference == first_result["reference"]))
+        assert application is not None
+        assert application.tracking_code_hash
+        assert first_result["access_code"] not in application.tracking_code_hash
+        audit_details = [str(row.details) for row in database.scalars(select(AuditEvent)).all()]
+        assert all(raw_invite not in value and first_result["access_code"] not in value for value in audit_details)
+        assert database.scalar(select(func.count(ApplicationStatusEvent.id)).where(ApplicationStatusEvent.application_id == application.id, ApplicationStatusEvent.to_status == "SUBMITTED")) == 1
+        assert database.get(AdmissionInvitation, UUID(invitation["id"])).submission_count == 1
+        assert client.post("/api/public/invitations/exchange", json={"token": raw_invite, "draft_key": "another-public-draft-key-0002"}).status_code == 404
+    
+        admin = _headers(admin_token)
+        asked = client.post(f"/api/admissions/applications/{application.id}/request-info", headers=admin, json={"reason": "Please confirm your phone number.", "fields": ["phone"]})
+        assert asked.status_code == 200, asked.text
+        assert asked.json()["status"] == "NEEDS_INFO"
+        rejected_csrf = client.post("/api/public/application/respond", json={"phone": "+998901112233"})
+        assert rejected_csrf.status_code == 403
+        response = client.post("/api/public/application/respond", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"phone": "+998901112233"})
+        assert response.status_code == 200, response.text
+        submitted_again = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert submitted_again.status_code == 200, submitted_again.text
+        assert submitted_again.json()["access_code"] == ""
+        assert application.tracking_code_hash
+    
+        asked_file = client.post(f"/api/admissions/applications/{application.id}/request-info", headers=admin, json={"reason": "Please upload a new photo.", "fields": ["photo"]})
+        assert asked_file.status_code == 200
+        stale_file_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert stale_file_submit.status_code == 422
+        refreshed_photo = client.post(
+            "/api/public/application/files",
+            headers={"X-CSRF-Token": public_session["csrf_token"]},
+            data={"kind": "PHOTO", "document_type": ""},
+            files={"upload": ("new-photo.png", _png_bytes(), "image/png")},
+        )
+        assert refreshed_photo.status_code == 201
+        final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert final_submit.status_code == 200
+    
+        room = client.post("/api/rooms", headers=_headers(operator_token), json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1, "price": "300000"})
+        assert room.status_code == 201, room.text
+        approved = client.post(f"/api/admissions/applications/{application.id}/approve", headers=admin, json={
+            "reason": "Identity and documents checked.",
+            "room_id": room.json()["id"],
+            "move_in": "2026-11-01",
+        })
+        assert approved.status_code == 200, approved.text
+        stored_file = database.scalar(select(ApplicationFile).where(ApplicationFile.application_id == application.id, ApplicationFile.deleted_at.is_(None)))
+        assert stored_file is not None and stored_file.delete_after is not None
+        resident = database.get(Resident, UUID(approved.json()["resident_id"]))
+        assert resident is not None and resident.room_id is not None
+        assert database.scalar(select(func.count(ResidencePeriod.id)).where(ResidencePeriod.resident_id == resident.id)) == 1
+        assert resident.agreed_price == 300000
+        assert resident.payment_period_days == 30
+        periods = database.scalars(select(BillingPeriod).where(BillingPeriod.resident_id == resident.id)).all()
+        assert len(periods) == 1
+        assert periods[0].charge_amount == 300000
+        assert periods[0].start_date.isoformat() == "2026-11-01"
+        assert periods[0].end_date.isoformat() == "2026-12-01"
+    
+        summary_headers = _headers(admin_token)
+        summary = client.get("/api/admissions/summary", headers=summary_headers)
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["approved_applications"] == 1
+        assert summary.json()["linked_residents"] == 1
+>       assert Decimal(summary.json()["expected_payments"]) == Decimal("300000.00")
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'expected_payments'
+
+tests\test_admissions.py:162: KeyError
+_______ test_approval_links_matching_resident_without_duplicate_billing _______
+
+client = <starlette.testclient.TestClient object at 0x0000021E3FB7C590>
+database = <sqlalchemy.orm.session.Session object at 0x0000021E3FAEBC80>
+operator_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhOGJlM2UwYS0wMmUyLTRkNWEtOTYxMS1iMjQ3ZjdjNDBmNTEiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjcyLCJleHAiOjE3OTM4MTg0NzJ9.0oP3wsKu2wjTMjYfQXBSyZk3a0nEpeOE3Qrz7sD4YgE'
+admin_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiYWIwNmU0Ny04ZjE4LTRhYTAtOTlkMS1mMzdiY2QzNmM2ZDgiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjcyLCJleHAiOjE3OTM4MTg0NzJ9.tiEs4QAEpWlYLMEsEMgREtaznOK7w3Ss0lHl80mHI3s'
+tmp_path = WindowsPath('C:/Users/user/AppData/Local/Temp/pytest-of-user/pytest-55/test_approval_links_matching_r0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021E4075BC80>
+
+    def test_approval_links_matching_resident_without_duplicate_billing(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+        dormitory, _, _, _, public_session = _workflow(client, operator_token, admin_token)
+        admin = _headers(admin_token)
+        room = client.post("/api/rooms", headers=_headers(operator_token), json={
+            "number": "303", "dormitory_id": dormitory["id"], "floor": 3, "capacity": 2, "price": "500000",
+        })
+        assert room.status_code == 201, room.text
+        existing = client.post("/api/residents", headers=_headers(operator_token), json={
+            "first_name": "Aziza", "last_name": "Karimova", "phone": "+998901234567",
+            "payment_period_days": 30, "agreed_price": "400000",
+            "billing_start": "2026-11-01", "billing_end": "2026-12-01",
+        })
+        assert existing.status_code == 201, existing.text
+        existing_resident = database.get(Resident, UUID(existing.json()["id"]))
+        assert existing_resident is not None
+        existing_resident.departed_on = date(2026, 10, 20)
+        database.commit()
+    
+        _fill_application(client, public_session)
+        submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMIT)
+        assert submitted.status_code == 200, submitted.text
+        application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
+        assert application is not None
+        duplicates = client.get(f"/api/admissions/applications/{application.id}/duplicates", headers=admin)
+        assert duplicates.status_code == 200, duplicates.text
+        assert duplicates.json()[0]["id"] == existing.json()["id"]
+>       assert Decimal(duplicates.json()[0]["agreed_price"]) == Decimal("400000.00")
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'agreed_price'
+
+tests\test_admissions.py:228: KeyError
+_________ test_approved_application_without_resident_can_be_repaired __________
+
+client = <starlette.testclient.TestClient object at 0x0000021E3FC29CD0>
+database = <sqlalchemy.orm.session.Session object at 0x0000021E40A40860>
+operator_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMzQ2MGQxNy01MzU0LTRjZGItYjdhZi1jMDFlM2M3MzNkZjciLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjczLCJleHAiOjE3OTM4MTg0NzN9.FP_LP96MTsydnUiorbi92c2R2oxCnJA7okvfs0KudDs'
+admin_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZDA4ZjI2Zi1kYWQ5LTRjMTAtYjI0OC1hZjIxOWVhYzgyMDgiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NjczLCJleHAiOjE3OTM4MTg0NzN9.f9RyjaFHjR3Q7dnKN0-mwsBxwupZ0eu4HMCYOW5pi3g'
+tmp_path = WindowsPath('C:/Users/user/AppData/Local/Temp/pytest-of-user/pytest-55/test_approved_application_with0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000021E40908F20>
+
+    def test_approved_application_without_resident_can_be_repaired(client, database, operator_token, admin_token, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "file_local_directory", str(tmp_path / "private-files"))
+        dormitory, _, _, _, public_session = _workflow(client, operator_token, admin_token)
+        _fill_application(client, public_session)
+        submitted = client.post(
+            "/api/public/application/submit",
+            headers={"X-CSRF-Token": public_session["csrf_token"]},
+            json=SUBMIT,
+        )
+        assert submitted.status_code == 200, submitted.text
+        application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["reference"]))
+        assert application is not None
+    
+        # Model a legacy or manually unlinked approved record.
+        application.status = "APPROVED"
+        application.terminal_at = datetime.now(UTC)
+        original_terminal_at = application.terminal_at
+        database.commit()
+        room = client.post("/api/rooms", headers=_headers(operator_token), json={
+            "number": "404", "dormitory_id": dormitory["id"], "floor": 4, "capacity": 1, "price": "300000",
+        })
+        assert room.status_code == 201, room.text
+    
+        repaired = client.post(f"/api/admissions/applications/{application.id}/approve", headers=_headers(admin_token), json={
+            "reason": "Resident profile link restored.", "room_id": room.json()["id"], "move_in": "2026-11-01",
+        })
+        assert repaired.status_code == 200, repaired.text
+        assert repaired.json()["status"] == "APPROVED"
+        assert repaired.json()["resident_id"]
+        assert application.terminal_at == original_terminal_at
+        assert database.scalar(select(func.count(Resident.id))) == 1
+        assert database.scalar(select(func.count(ResidencePeriod.id))) == 1
+        assert database.scalar(select(func.count(BillingPeriod.id))) == 1
+        assert database.scalar(select(func.count(ApplicationStatusEvent.id)).where(
+            ApplicationStatusEvent.application_id == application.id,
+            ApplicationStatusEvent.to_status == "APPROVED",
+        )) == 0
+        assert database.scalar(select(func.count(AuditEvent.id)).where(
+            AuditEvent.action == "APPLICATION_RESIDENT_LINKED",
+            AuditEvent.entity_id == application.id,
+        )) == 1
+        retry = client.post(f"/api/admissions/applications/{application.id}/approve", headers=_headers(admin_token), json={
+            "reason": "Retry the recovered request.", "room_id": room.json()["id"], "move_in": "2026-11-01",
+        })
+        assert retry.status_code == 200, retry.text
+        assert database.scalar(select(func.count(Resident.id))) == 1
+        assert database.scalar(select(func.count(ResidencePeriod.id))) == 1
+        assert database.scalar(select(func.count(BillingPeriod.id))) == 1
+        resident_list = client.get("/api/residents", headers=_headers(admin_token), params={"departed": "active"})
+        assert resident_list.status_code == 200, resident_list.text
+>       assert resident_list.json()["total"] == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'total'
+
+tests\test_admissions.py:304: KeyError
+______ test_migrations_build_and_drop_the_full_schema_and_backfill_rooms ______
+
+    def test_migrations_build_and_drop_the_full_schema_and_backfill_rooms():
+        root = Path(__file__).parents[1]
+        initial = load_revision(root / "alembic" / "versions" / "0001_initial.py")
+        current = load_revision(root / "alembic" / "versions" / "16f28cfa0755_admission_and_residency_workflow.py")
+        financial = load_revision(root / "alembic" / "versions" / "20261026_01_financial_controls_and_expenses.py")
+        ocr = load_revision(root / "alembic" / "versions" / "20261026_02_application_file_ocr.py")
+        file_blobs = load_revision(root / "alembic" / "versions" / "20261026_03_postgres_application_file_blobs.py")
+        departures = load_revision(root / "alembic" / "versions" / "20261027_01_resident_departures.py")
+        ai_extraction = load_revision(root / "alembic" / "versions" / "20261028_01_openrouter_document_extraction.py")
+        staff_tasks = load_revision(root / "alembic" / "versions" / "20261030_01_staff_tasks.py")
+        engine = create_engine("sqlite://")
+        room_id, resident_id = uuid4(), uuid4()
+        application_id, application_file_id = uuid4(), uuid4()
+        created = datetime.now(UTC)
+        with engine.begin() as connection:
+            ops = Operations(MigrationContext.configure(connection))
+            initial.op = ops
+            initial.upgrade()
+            ops.bulk_insert(
+                table("system_settings", column("key", String()), column("value", JSON()), column("updated_by", Uuid()), column("updated_at", DateTime(timezone=True))),
+                [{"key": "general", "value": {"dorm_name": "Legacy Hall", "default_period_days": 30, "currency": "UZS"}, "updated_by": None, "updated_at": created}],
+            )
+            ops.bulk_insert(
+                table("rooms", column("id", Uuid()), column("number", String()), column("floor", Integer()), column("capacity", Integer()), column("price", Numeric(14, 2)), column("notes", Text()), column("is_active", Boolean()), column("created_at", DateTime(timezone=True)), column("updated_at", DateTime(timezone=True))),
+                [{"id": room_id, "number": "101", "floor": 1, "capacity": 2, "price": None, "notes": "", "is_active": True, "created_at": created, "updated_at": created}],
+            )
+            ops.bulk_insert(
+                table("residents", column("id", Uuid()), column("first_name", String()), column("last_name", String()), column("phone", String()), column("telegram_username", String()), column("room_id", Uuid()), column("check_in_date", Date()), column("payment_period_days", Integer()), column("agreed_price", Numeric(14, 2)), column("notes", Text()), column("is_archived", Boolean()), column("archived_at", DateTime(timezone=True)), column("created_at", DateTime(timezone=True)), column("updated_at", DateTime(timezone=True))),
+                [{"id": resident_id, "first_name": "Test", "last_name": "Resident", "phone": None, "telegram_username": None, "room_id": room_id, "check_in_date": date(2026, 1, 10), "payment_period_days": None, "agreed_price": None, "notes": "", "is_archived": False, "archived_at": None, "created_at": created, "updated_at": created}],
+            )
+            current.op = ops
+            current.upgrade()
+            ops.bulk_insert(
+                table(
+                    "application_files",
+                    column("id", Uuid()), column("application_id", Uuid()), column("kind", String()),
+                    column("document_type", String()), column("object_key", String()), column("original_name", String()),
+                    column("content_type", String()), column("size_bytes", Integer()), column("scan_status", String()),
+                    column("delete_after", DateTime(timezone=True)), column("deleted_at", DateTime(timezone=True)),
+                    column("uploaded_at", DateTime(timezone=True)),
+                ),
+                [{
+                    "id": application_file_id, "application_id": application_id, "kind": "DOCUMENT",
+                    "document_type": "ID", "object_key": "admissions/legacy/id.png", "original_name": "id.png",
+                    "content_type": "image/png", "size_bytes": 1, "scan_status": "NOT_CONFIGURED",
+                    "delete_after": None, "deleted_at": None, "uploaded_at": created,
+                }],
+            )
+            financial.op = ops
+            financial.upgrade()
+            ocr.op = ops
+            ocr.upgrade()
+            file_blobs.op = ops
+            file_blobs.upgrade()
+            departures.op = ops
+            departures.upgrade()
+            ai_extraction.op = ops
+            ai_extraction.upgrade()
+            staff_tasks.op = ops
+            staff_tasks.upgrade()
+            inspector = inspect(connection)
+            expected = {"users", "rooms", "residents", "billing_periods", "billing_changes", "payments", "payment_adjustments", "audit_events", "notifications", "system_settings", "dormitories", "admission_campaigns", "admission_invitations", "student_applications", "application_files", "application_file_blobs", "application_status_events", "application_access_sessions", "residence_periods", "public_rate_limits", "expenses", "staff_tasks"}
+            assert expected <= set(inspector.get_table_names())
+            file_columns = {column["name"] for column in inspector.get_columns("application_files")}
+            assert {"ai_status", "extracted_data"} <= file_columns
+            assert not {"ocr_status", "ocr_text", "ocr_truncated"} & file_columns
+            ai_backfill = connection.exec_driver_sql(
+                "SELECT ai_status, extracted_data FROM application_files WHERE id = ?",
+                (application_file_id.hex,),
+            ).first()
+            assert ai_backfill == ("NOT_CONFIGURED", "{}")
+>           assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
+E           AssertionError: assert [('add_table'...unts>))), ...] == []
+E             
+E             Left contains 12 more items, first extra item: ('add_table', Table('telegram_outbox', MetaData(), Column('id', Uuid(), table=<telegram_outbox>, primary_key=True, nul...ion utcnow at 0x0000021E3C9751C0>)), Column('sent_at', DateTime(timezone=True), table=<telegram_outbox>), schema=None))
+E             Use -v to get more diff
+
+tests\test_migrations.py:94: AssertionError
+__________ test_notifications_are_created_by_job_and_scoped_per_user __________
+
+client = <starlette.testclient.TestClient object at 0x0000021E42CDBE30>
+database = <sqlalchemy.orm.session.Session object at 0x0000021E42B234D0>
+operator_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2Y2E2OTRjYy02YTJlLTQwOTgtODgyZC1hZjkxZjNhZWRkNWIiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NzI2LCJleHAiOjE3OTM4MTg1MjZ9.LmUc--w11cy7R6juQrGfhKhC3LTIJEmScsPgRRqTsEU'
+admin_token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2ZGVjMjY3Yi1kYWU4LTQyZjktYjdkYi1hZDBlZGQ5YzI4M2UiLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzkzODE2NzI2LCJleHAiOjE3OTM4MTg1MjZ9.nMVj7YTa0hdel08toJHIh154pPaaOauq8cofHpAp8b4'
+
+    def test_notifications_are_created_by_job_and_scoped_per_user(client, database, operator_token, admin_token):
+        today = datetime.now(ZoneInfo("Asia/Tashkent")).date()
+        operator_headers = {"Authorization": f"Bearer {operator_token}"}
+        person = client.post("/api/residents", headers=operator_headers, json={
+            "first_name": "Zuhra", "last_name": "Rahimova", "payment_period_days": 30,
+            "agreed_price": "300000", "billing_start": (today - timedelta(days=31)).isoformat(),
+        }).json()
+    
+        # GET remains read-only; due notices are generated by the scheduled job.
+        assert not any(item["kind"] == "OVERDUE" for item in client.get("/api/notifications", headers=operator_headers).json())
+        result = run_daily_jobs(database, today)
+>       assert result["reminders_created"] == 2
+E       assert 1 == 2
+
+tests\test_notifications.py:19: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_admissions.py::test_admission_approval_creates_resident_billing_and_updates_statistics
+FAILED tests/test_admissions.py::test_approval_links_matching_resident_without_duplicate_billing
+FAILED tests/test_admissions.py::test_approved_application_without_resident_can_be_repaired
+FAILED tests/test_migrations.py::test_migrations_build_and_drop_the_full_schema_and_backfill_rooms
+FAILED tests/test_notifications.py::test_notifications_are_created_by_job_and_scoped_per_user
+5 failed, 44 passed in 87.10s (0:01:27)

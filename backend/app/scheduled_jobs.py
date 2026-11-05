@@ -13,6 +13,7 @@ from app.api import ensure_due_periods
 from app.db import SessionLocal
 from app.models import BillingPeriod, Notification, Resident, User
 from app.services import resident_out, today_local
+from app.telegram import mirror_notification
 
 
 def run_daily_jobs(db: Session, as_of: date | None = None) -> dict[str, int]:
@@ -27,7 +28,9 @@ def run_daily_jobs(db: Session, as_of: date | None = None) -> dict[str, int]:
     after_count = db.scalar(select(func.count(BillingPeriod.id))) or 0
     created_periods = max(0, after_count - before_count)
 
-    users = db.scalars(select(User).where(User.is_active.is_(True))).all()
+    # Payment reminders are operator-only; administrators must not receive a
+    # text that could disclose a balance or payment amount.
+    users = db.scalars(select(User).where(User.is_active.is_(True), User.role == "OPERATOR")).all()
     created_reminders = 0
     for resident in residents:
         state = resident_out(db, resident, today)
@@ -46,11 +49,13 @@ def run_daily_jobs(db: Session, as_of: date | None = None) -> dict[str, int]:
             notification_id = uuid5(NAMESPACE_URL, f"rs-best-hostel:due:{today.isoformat()}:{user.id}:{resident.id}")
             if db.get(Notification, notification_id):
                 continue
-            db.add(Notification(
+            reminder = Notification(
                 id=notification_id, user_id=user.id, title=title, message=message,
                 kind=state.billing_status, entity_id=resident.id, read_at=None,
                 created_at=datetime.now(UTC),
-            ))
+            )
+            db.add(reminder)
+            mirror_notification(db, reminder)
             created_reminders += 1
     db.commit()
     return {"billing_periods_created": created_periods, "reminders_created": created_reminders}

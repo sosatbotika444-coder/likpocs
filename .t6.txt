@@ -1,0 +1,30 @@
+﻿32: SUBMIT = {"consent": True, "contract_accepted": True, "signature_name": "Aziza Karimova"}\n\n\ndef _headers(token: str) 
+85: submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=S
+86: assert submitted.status_code == 200, submitted.text
+87: first_result = submitted.json()
+91: retry = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=SUBMI
+102: assert database.scalar(select(func.count(ApplicationStatusEvent.id)).where(ApplicationStatusEvent.application_id == appl
+114: submitted_again = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, 
+115: assert submitted_again.status_code == 200, submitted_again.text
+116: assert submitted_again.json()["access_code"] == ""
+121: stale_file_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}
+122: assert stale_file_submit.status_code == 422
+130: final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, jso
+131: assert final_submit.status_code == 200
+133: room = client.post("/api/rooms", headers=_headers(operator_token), json={"number": "101", "dormitory_id": dormitory["id"
+202: room = client.post("/api/rooms", headers=_headers(operator_token), json={
+218: submitted = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json=S
+219: assert submitted.status_code == 200, submitted.text
+220: application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["referen
+255: submitted = client.post(
+256: "/api/public/application/submit",
+258: json=SUBMIT,
+260: assert submitted.status_code == 200, submitted.text
+261: application = database.scalar(select(StudentApplication).where(StudentApplication.reference == submitted.json()["referen
+269: room = client.post("/api/rooms", headers=_headers(operator_token), json={
+646: room = client.post("/api/rooms", headers=_headers(operator_token), json={"number": "202", "dormitory_id": dormitory["id"
+650: first_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": first_session["csrf_token"]}, json
+651: first_id = client.get("/api/admissions/applications", headers=admin, params={"q": first_submit.json()["reference"]}).jso
+661: second_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": second_session["csrf_token"]}, js
+662: assert second_submit.status_code == 200, second_submit.text
+663: second_id = client.get("/api/admissions/applications", headers=admin, params={"q": second_submit.json()["reference"]}).j

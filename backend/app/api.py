@@ -37,7 +37,15 @@ from app.billing import (
 )
 from app.config import settings
 from app.db import get_db
-from app.dependencies import get_current_user, require_billing_permission, require_operator
+from app.dependencies import (
+    get_current_user,
+    require_billing_permission,
+    require_investor_view,
+    require_money_access,
+    require_operations_staff,
+    require_operator,
+    require_payment_recording_permission,
+)
 from app.models import (
     AuditEvent,
     ApplicationFile,
@@ -53,6 +61,7 @@ from app.models import (
     Room,
     SystemSetting,
     StudentApplication,
+    TelegramAccount,
     User,
 )
 from app.schemas import (
@@ -60,6 +69,7 @@ from app.schemas import (
     BillingPeriodOut,
     CheckoutRequest,
     DashboardOut,
+    DashboardStaffOut,
     ExtendRequest,
     ExpenseCreate,
     ExpenseOut,
@@ -67,6 +77,7 @@ from app.schemas import (
     LoginRequest,
     NotificationOut,
     PageInfo,
+    StaffPageInfo,
     PaymentAdjustmentCreate,
     PaymentAdjustmentOut,
     PaymentCreate,
@@ -74,21 +85,32 @@ from app.schemas import (
     RefreshRequest,
     ResidentCreate,
     ResidentDetail,
+    ResidentStaffDetail,
+    ResidentStaffOut,
     ResidentOut,
     ResidentUpdate,
     RoomCreate,
     RoomOut,
+    RoomStaffOut,
     RoomUpdate,
     SystemSettingsIn,
     SystemSettingsOut,
+    TelegramLinkCodeOut,
+    TelegramStatusOut,
     TokenPair,
     UserCreate,
     UserOut,
     UserUpdate,
+    InvestorMonthOut,
+    InvestorSummaryOut,
 )
 from app.security import create_token_pair, hash_password, verify_password
-from app.services import audit_out, expense_out, notification_out, payment_out, resident_detail, resident_out, room_out, today_local
+from app.services import (
+    audit_out, expense_out, notification_out, notification_staff_out, payment_out, resident_detail, resident_out,
+    resident_staff_detail, resident_staff_out, room_out, room_staff_out, today_local, user_out,
+)
 from app.residency import assert_room_available, close_open_period, record_room_assignment
+from app.telegram import bot_username, create_link_code, telegram_configured
 
 router = APIRouter(prefix="/api")
 UZ_MONTHS = ["yanvar", "fevral", "mart", "aprel", "may", "iyun", "iyul", "avgust", "sentabr", "oktabr", "noyabr", "dekabr"]
@@ -110,6 +132,16 @@ def natural_room_key(number: str) -> tuple[tuple[int, object], ...]:
 
 def page_result(items: list, total: int, skip: int, limit: int) -> PageInfo:
     return PageInfo(items=items, total=total, skip=skip, limit=limit)
+
+
+def staff_page_result(items: list, count: int, skip: int, limit: int) -> StaffPageInfo:
+    return StaffPageInfo(items=items, count=count, skip=skip, limit=limit)
+
+
+def reject_admin_money_fields(actor: User, supplied: set[str], forbidden: set[str]) -> None:
+    """Reject forbidden financial request keys instead of silently ignoring them."""
+    if actor.role == "ADMIN" and supplied.intersection(forbidden):
+        raise HTTPException(status_code=403, detail="Bu moliyaviy maydonni faqat operator boshqara oladi.")
 
 
 def ensure_due_periods(db: Session, residents: list[Resident], actor: User) -> None:
@@ -217,6 +249,27 @@ def get_report_rows(
     raise HTTPException(status_code=404, detail="Hisobot turi topilmadi.")
 
 
+def get_staff_report_rows(db: Session, kind: Literal["residents", "rooms"]) -> tuple[list[str], list[list[object]]]:
+    """Non-financial exports for ADMIN; the financial columns never reach a serializer."""
+    if kind == "residents":
+        headers = ["Ism", "Familiya", "Telefon", "Telegram", "Xona", "Ko'chib kirgan sana", "Holat"]
+        residents = db.scalars(
+            select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False)).order_by(Resident.last_name, Resident.first_name)
+        ).all()
+        rows = [
+            [item.first_name, item.last_name, item.phone or "", item.telegram_username or "", item.room.number if item.room else "", item.check_in_date or "", "Yashamoqda" if item.departed_on is None else "Chiqib ketgan"]
+            for item in residents
+        ]
+        return headers, rows
+    headers = ["Xona", "Qavat", "Sig'im", "Band", "Bo'sh o'rin", "Izoh"]
+    rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
+    rows = []
+    for room in rooms:
+        item = room_staff_out(db, room)
+        rows.append([item.number, item.floor, item.capacity, item.resident_count, item.available_beds, item.notes])
+    return headers, rows
+
+
 @router.get("/health")
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     db.execute(select(1))
@@ -249,18 +302,18 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenPair
 
 
 @router.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)) -> User:
-    return user
+def me(user: User = Depends(get_current_user)) -> UserOut:
+    return user_out(user)
 
 
 @router.get("/users", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db), _: User = Depends(require_operator)) -> list[User]:
-    return db.scalars(select(User).order_by(User.created_at)).all()
+def list_users(db: Session = Depends(get_db), _: User = Depends(require_operator)) -> list[UserOut]:
+    return [user_out(user) for user in db.scalars(select(User).order_by(User.created_at)).all()]
 
 
 @router.post("/users", response_model=UserOut, status_code=201)
 def create_user(payload: UserCreate, db: Session = Depends(get_db), actor: User = Depends(require_operator)) -> User:
-    user = User(email=str(payload.email).lower(), full_name=payload.full_name.strip(), password_hash=hash_password(payload.password), role="ADMIN", is_active=True, is_primary=False)
+    user = User(email=str(payload.email).lower(), full_name=payload.full_name.strip(), password_hash=hash_password(payload.password), role=payload.role, is_active=True, is_primary=False)
     db.add(user)
     db.flush()
     audit(db, actor, "USER_CREATED", "User", user.id, {"email": user.email, "role": user.role})
@@ -270,7 +323,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), actor: User 
         db.rollback()
         raise HTTPException(status_code=409, detail="Bu elektron pochta allaqachon ro‘yxatdan o‘tgan.") from None
     db.refresh(user)
-    return user
+    return user_out(user)
 
 
 @router.patch("/users/{user_id}", response_model=UserOut)
@@ -287,29 +340,64 @@ def update_user(user_id: UUID, payload: UserUpdate, db: Session = Depends(get_db
         user.password_hash = hash_password(values["password"])
     if "is_active" in values and values["is_active"] is not None:
         user.is_active = values["is_active"]
+    if "role" in values and values["role"] is not None:
+        user.role = values["role"]
     audit(db, actor, "USER_UPDATED", "User", user.id, {"changed_fields": sorted(k for k in values if k != "password")})
     db.commit()
     db.refresh(user)
-    return user
+    return user_out(user)
 
 
-@router.get("/rooms", response_model=PageInfo)
+@router.get("/telegram/status", response_model=TelegramStatusOut)
+def telegram_status(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> TelegramStatusOut:
+    """Whether the signed-in user's own chat is linked; never exposes other users' chats."""
+    account = db.scalar(select(TelegramAccount).where(TelegramAccount.user_id == actor.id, TelegramAccount.is_active.is_(True)))
+    return TelegramStatusOut(configured=telegram_configured(), bot_username=bot_username(), linked=account is not None, username=account.username if account else "")
+
+
+@router.post("/telegram/link-code", response_model=TelegramLinkCodeOut, status_code=201)
+def telegram_link_code(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> TelegramLinkCodeOut:
+    if not telegram_configured():
+        raise HTTPException(status_code=503, detail="Telegram bot hali sozlanmagan.")
+    code, expires_at = create_link_code(db, actor)
+    audit(db, actor, "TELEGRAM_LINK_CODE_CREATED", "User", actor.id)
+    db.commit()
+    name = bot_username()
+    return TelegramLinkCodeOut(code=code, expires_at=expires_at, bot_username=name, link=f"https://t.me/{name}?start=link_{code}" if name else None)
+
+
+@router.delete("/telegram/link", status_code=204)
+def telegram_unlink(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> Response:
+    """Disconnect the chat (kept as an inactive row so the audit trail stays traceable)."""
+    accounts = db.scalars(select(TelegramAccount).where(TelegramAccount.user_id == actor.id, TelegramAccount.is_active.is_(True))).all()
+    for account in accounts:
+        account.is_active = False
+    if accounts:
+        audit(db, actor, "TELEGRAM_UNLINKED", "User", actor.id)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.get("/rooms", response_model=PageInfo | StaffPageInfo)
 def list_rooms(
     status_filter: Literal["all", "available", "full"] = Query(default="all", alias="status"),
     skip: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_operations_staff),
 ) -> PageInfo:
     rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
-    items = [room_out(db, room) for room in rooms]
+    items = [room_out(db, room) if actor.role == "OPERATOR" else room_staff_out(db, room) for room in rooms]
     if status_filter == "available":
         items = [room for room in items if room.available_beds > 0]
     elif status_filter == "full":
         items = [room for room in items if room.available_beds == 0]
+    if actor.role == "ADMIN":
+        return staff_page_result(items[skip:skip + limit], len(items), skip, limit)
     return page_result(items[skip:skip + limit], len(items), skip, limit)
 
 
-@router.post("/rooms", response_model=RoomOut, status_code=201)
-def create_room(payload: RoomCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> RoomOut:
+@router.post("/rooms", response_model=RoomOut | RoomStaffOut, status_code=201)
+def create_room(payload: RoomCreate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> RoomOut | RoomStaffOut:
+    reject_admin_money_fields(actor, set(payload.model_fields_set), {"price"})
     dormitory = db.get(Dormitory, payload.dormitory_id) if payload.dormitory_id else db.scalar(select(Dormitory).where(Dormitory.is_default.is_(True)))
     if payload.dormitory_id and dormitory is None:
         raise HTTPException(status_code=422, detail="Yotoqxona topilmadi.")
@@ -329,15 +417,16 @@ def create_room(payload: RoomCreate, db: Session = Depends(get_db), actor: User 
         db.rollback()
         raise HTTPException(status_code=409, detail="Bu xona raqami mavjud.") from None
     db.refresh(room)
-    return room_out(db, room)
+    return room_out(db, room) if actor.role == "OPERATOR" else room_staff_out(db, room)
 
 
-@router.patch("/rooms/{room_id}", response_model=RoomOut)
-def update_room(room_id: UUID, payload: RoomUpdate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> RoomOut:
+@router.patch("/rooms/{room_id}", response_model=RoomOut | RoomStaffOut)
+def update_room(room_id: UUID, payload: RoomUpdate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> RoomOut | RoomStaffOut:
     room = db.get(Room, room_id)
     if not room or not room.is_active:
         raise HTTPException(status_code=404, detail="Xona topilmadi.")
     values = payload.model_dump(exclude_unset=True)
+    reject_admin_money_fields(actor, set(values), {"price"})
     if "dormitory_id" in values and values["dormitory_id"] != room.dormitory_id:
         target_dormitory = db.get(Dormitory, values["dormitory_id"]) if values["dormitory_id"] else None
         if not target_dormitory or not target_dormitory.is_active:
@@ -357,7 +446,7 @@ def update_room(room_id: UUID, payload: RoomUpdate, db: Session = Depends(get_db
         db.rollback()
         raise HTTPException(status_code=409, detail="Bu xona raqami mavjud.") from None
     db.refresh(room)
-    return room_out(db, room)
+    return room_out(db, room) if actor.role == "OPERATOR" else room_staff_out(db, room)
 
 
 @router.delete("/rooms/{room_id}", status_code=204)
@@ -376,14 +465,16 @@ def archive_room(room_id: UUID, db: Session = Depends(get_db), actor: User = Dep
     return Response(status_code=204)
 
 
-@router.get("/residents", response_model=PageInfo)
+@router.get("/residents", response_model=PageInfo | StaffPageInfo)
 def list_residents(
     q: str = "", room_id: UUID | None = None, payment_status: str = "all", archived: bool = False,
     departed: Literal["active", "departed", "all"] = "active",
     sort: str = "last_name", direction: Literal["asc", "desc"] = "asc",
     skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_operations_staff),
 ) -> PageInfo:
+    if actor.role == "ADMIN" and (payment_status != "all" or sort in {"price", "amount", "balance", "debt", "paid", "revenue", "total"}):
+        raise HTTPException(status_code=403, detail="Bu moliyaviy filtr yoki saralash uchun ruxsat yo'q.")
     query = select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(archived))
     if departed != "all":
         query = query.where(Resident.departed_on.is_not(None) if departed == "departed" else Resident.departed_on.is_(None))
@@ -397,15 +488,18 @@ def list_residents(
     order_col = {"first_name": Resident.first_name, "created_at": Resident.created_at}.get(sort, Resident.last_name)
     query = query.order_by(order_col.desc() if direction == "desc" else order_col.asc())
     records = db.scalars(query).unique().all()
-    items = [resident_out(db, resident) for resident in records]
+    items = [resident_out(db, resident) if actor.role == "OPERATOR" else resident_staff_out(db, resident) for resident in records]
     if payment_status != "all":
         items = [item for item in items if item.billing_status == payment_status.upper()]
     total = len(items)
+    if actor.role == "ADMIN":
+        return staff_page_result(items[skip:skip + limit], total, skip, limit)
     return page_result(items[skip:skip + limit], total, skip, limit)
 
 
-@router.post("/residents", response_model=ResidentOut, status_code=201)
-def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
+@router.post("/residents", response_model=ResidentOut | ResidentStaffOut, status_code=201)
+def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> ResidentOut | ResidentStaffOut:
+    reject_admin_money_fields(actor, set(payload.model_fields_set), {"payment_period_days", "agreed_price", "billing_start", "billing_end"})
     if payload.room_id:
         verify_room_capacity(db, payload.room_id, start_date=payload.check_in_date or today_local())
     resident = Resident(
@@ -436,26 +530,25 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), acto
     notify(db, "Yangi yashovchi", f"{resident.first_name} {resident.last_name} ro‘yxatga qo‘shildi.", "RESIDENT", resident.id, actor.id)
     db.commit()
     db.refresh(resident)
-    return resident_out(db, resident)
+    return resident_out(db, resident) if actor.role == "OPERATOR" else resident_staff_out(db, resident)
 
 
-@router.get("/residents/{resident_id}", response_model=ResidentDetail)
-def get_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentDetail:
+@router.get("/residents/{resident_id}", response_model=ResidentDetail | ResidentStaffDetail)
+def get_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> ResidentDetail | ResidentStaffDetail:
     resident = db.scalar(select(Resident).options(joinedload(Resident.room)).where(Resident.id == resident_id))
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
-    return resident_detail(db, resident)
+    return resident_detail(db, resident) if actor.role == "OPERATOR" else resident_staff_detail(db, resident)
 
 
-@router.patch("/residents/{resident_id}", response_model=ResidentOut)
-def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
+@router.patch("/residents/{resident_id}", response_model=ResidentOut | ResidentStaffOut)
+def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> ResidentOut | ResidentStaffOut:
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
     values = payload.model_dump(exclude_unset=True)
     billing_keys = {"billing_start", "billing_end", "payment_period_days", "agreed_price"}
-    if billing_keys.intersection(values) and actor.role != "OPERATOR" and not settings.admins_can_adjust_billing:
-        raise HTTPException(status_code=403, detail="To‘lov davrini faqat operator o‘zgartira oladi.")
+    reject_admin_money_fields(actor, set(values), billing_keys)
     next_room = values.get("room_id", resident.room_id)
     next_start = values.get("check_in_date", resident.check_in_date)
     if "room_id" in values or "check_in_date" in values:
@@ -503,11 +596,11 @@ def update_resident(resident_id: UUID, payload: ResidentUpdate, db: Session = De
     db.refresh(resident)
     ensure_due_periods(db, [resident], actor)
     db.commit()
-    return resident_out(db, resident)
+    return resident_out(db, resident) if actor.role == "OPERATOR" else resident_staff_out(db, resident)
 
 
-@router.post("/residents/{resident_id}/archive", response_model=ResidentOut)
-def archive_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
+@router.post("/residents/{resident_id}/archive", response_model=ResidentOut | ResidentStaffOut)
+def archive_resident(resident_id: UUID, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> ResidentOut | ResidentStaffOut:
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
@@ -522,11 +615,11 @@ def archive_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
                 attachment.delete_after = resident.archived_at + timedelta(days=settings.file_retention_days)
         audit(db, actor, "RESIDENT_ARCHIVED", "Resident", resident.id)
         db.commit()
-    return resident_out(db, resident)
+    return resident_out(db, resident) if actor.role == "OPERATOR" else resident_staff_out(db, resident)
 
 
-@router.post("/residents/{resident_id}/checkout", response_model=ResidentOut)
-def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> ResidentOut:
+@router.post("/residents/{resident_id}/checkout", response_model=ResidentOut | ResidentStaffOut)
+def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> ResidentOut | ResidentStaffOut:
     resident = db.scalar(select(Resident).where(Resident.id == resident_id).with_for_update())
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
@@ -557,7 +650,7 @@ def checkout_resident(resident_id: UUID, payload: CheckoutRequest, db: Session =
     })
     db.commit()
     db.refresh(resident)
-    return resident_out(db, resident)
+    return resident_out(db, resident) if actor.role == "OPERATOR" else resident_staff_out(db, resident)
 
 
 @router.post("/residents/{resident_id}/restore", response_model=ResidentOut)
@@ -578,7 +671,7 @@ def restore_resident(resident_id: UUID, db: Session = Depends(get_db), actor: Us
 
 
 @router.post("/residents/{resident_id}/extend", response_model=BillingPeriodOut)
-def extend_resident(resident_id: UUID, payload: ExtendRequest, db: Session = Depends(get_db), actor: User = Depends(require_billing_permission)) -> BillingPeriodOut:
+def extend_resident(resident_id: UUID, payload: ExtendRequest, db: Session = Depends(get_db), actor: User = Depends(require_money_access)) -> BillingPeriodOut:
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
@@ -596,7 +689,7 @@ def extend_resident(resident_id: UUID, payload: ExtendRequest, db: Session = Dep
 
 
 @router.get("/residents/{resident_id}/payments", response_model=list[PaymentOut])
-def resident_payments(resident_id: UUID, db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[PaymentOut]:
+def resident_payments(resident_id: UUID, db: Session = Depends(get_db), _: User = Depends(require_money_access)) -> list[PaymentOut]:
     if not db.get(Resident, resident_id):
         raise HTTPException(status_code=404, detail="Yashovchi topilmadi.")
     rows = db.scalars(select(Payment).options(joinedload(Payment.resident)).where(Payment.resident_id == resident_id).order_by(Payment.payment_date.desc(), Payment.created_at.desc())).all()
@@ -607,7 +700,7 @@ def resident_payments(resident_id: UUID, db: Session = Depends(get_db), _: User 
 def list_payments(
     resident_id: UUID | None = None, date_from: date | None = None, date_to: date | None = None,
     skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(require_money_access),
 ) -> PageInfo:
     query = select(Payment).options(joinedload(Payment.resident)).order_by(Payment.payment_date.desc(), Payment.created_at.desc())
     if resident_id:
@@ -625,7 +718,7 @@ def list_payments(
 def create_payment(
     payload: PaymentCreate,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128, description="Majburiy: takroriy to‘lov yozuvlarini oldini oladi."),
-    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_payment_recording_permission),
 ) -> PaymentOut:
     if idempotency_key is None:
         raise HTTPException(status_code=422, detail="To‘lovni qayd etish uchun Idempotency-Key sarlavhasi majburiy.")
@@ -705,7 +798,7 @@ def create_payment(
 def list_expenses(
     date_from: date | None = None, date_to: date | None = None,
     include_voided: bool = False, skip: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
-    db: Session = Depends(get_db), _: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _: User = Depends(require_money_access),
 ) -> PageInfo:
     if date_from and date_to and date_to < date_from:
         raise HTTPException(status_code=422, detail="Yakuniy sana boshlang'ich sanadan oldin bo'lishi mumkin emas.")
@@ -725,7 +818,7 @@ def list_expenses(
 def create_expense(
     payload: ExpenseCreate,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=128, description="Majburiy: takroriy xarajat yozuvlarini oldini oladi."),
-    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_money_access),
 ) -> ExpenseOut:
     if idempotency_key is None:
         raise HTTPException(status_code=422, detail="Xarajatni qayd etish uchun Idempotency-Key sarlavhasi majburiy.")
@@ -821,8 +914,8 @@ def list_adjustments(payment_id: UUID, db: Session = Depends(get_db), _: User = 
     return db.scalars(select(PaymentAdjustment).where(PaymentAdjustment.payment_id == payment_id).order_by(PaymentAdjustment.created_at)).all()
 
 
-@router.get("/dashboard", response_model=DashboardOut)
-def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> DashboardOut:
+@router.get("/dashboard", response_model=DashboardOut | DashboardStaffOut)
+def dashboard(db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> DashboardOut | DashboardStaffOut:
     today = today_local()
     residents = db.scalars(select(Resident).options(joinedload(Resident.room)).where(Resident.is_archived.is_(False))).all()
     active_rooms = sorted(db.scalars(select(Room).where(Room.is_active.is_(True))).all(), key=lambda room: natural_room_key(room.number))
@@ -831,6 +924,19 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
     capacity = sum(room.capacity for room in active_rooms)
     room_stats = [room_out(db, room) for room in active_rooms]
     assigned = sum(item.resident_count for item in room_stats)
+    if actor.role == "ADMIN":
+        new_residents = db.scalars(
+            select(Resident).options(joinedload(Resident.room)).where(
+                Resident.is_archived.is_(False), Resident.departed_on.is_(None)
+            ).order_by(Resident.created_at.desc()).limit(5)
+        ).all()
+        return DashboardStaffOut(
+            residents=len(currently_housed), rooms=len(active_rooms),
+            occupancy_rate=round(assigned / capacity * 100, 1) if capacity else 0,
+            available_beds=max(0, capacity - assigned),
+            occupancy_by_room=[{"room": item.number, "occupied": item.resident_count, "available": item.available_beds} for item in room_stats],
+            recent_residents=[resident_staff_out(db, item, today) for item in new_residents],
+        )
     month_start = today.replace(day=1)
     first_trend_index = month_start.year * 12 + month_start.month - 1 - 5
     first_trend_month = date(first_trend_index // 12, first_trend_index % 12 + 1, 1)
@@ -867,17 +973,82 @@ def dashboard(db: Session = Depends(get_db), actor: User = Depends(get_current_u
     )
 
 
+@router.get("/investor/summary", response_model=InvestorSummaryOut)
+def investor_summary(
+    date_from: date | None = None,
+    date_to: date | None = None,
+    group_by: Literal["month"] = Query(default="month", alias="group_by"),
+    include_occupancy: bool = True,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_investor_view),
+) -> InvestorSummaryOut:
+    """Return aggregate-only financial totals. No entity IDs or operational text."""
+    del group_by  # The public contract intentionally supports monthly aggregation only.
+    today = today_local()
+    start = date_from or today.replace(day=1)
+    end = date_to or today
+    if end < start:
+        raise HTTPException(status_code=422, detail="Sana oralig'i noto'g'ri.")
+    payments = db.scalars(
+        select(Payment).where(Payment.payment_date.between(start, end)).order_by(Payment.payment_date)
+    ).all()
+    revenue_by_month: dict[tuple[int, int], Decimal] = {}
+    for payment in payments:
+        key = (payment.payment_date.year, payment.payment_date.month)
+        revenue_by_month[key] = revenue_by_month.get(key, Decimal("0.00")) + net_payment(db, payment)
+    expenses = db.scalars(
+        select(Expense).where(
+            Expense.expense_date.between(start, end), Expense.voided_at.is_(None)
+        ).order_by(Expense.expense_date)
+    ).all()
+    expenses_by_month: dict[tuple[int, int], Decimal] = {}
+    for expense in expenses:
+        key = (expense.expense_date.year, expense.expense_date.month)
+        expenses_by_month[key] = expenses_by_month.get(key, Decimal("0.00")) + expense.amount
+    month_keys: list[tuple[int, int]] = []
+    cursor = start.replace(day=1)
+    final_month = end.replace(day=1)
+    while cursor <= final_month:
+        month_keys.append((cursor.year, cursor.month))
+        cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    revenue = sum(revenue_by_month.values(), Decimal("0.00"))
+    total_expenses = sum(expenses_by_month.values(), Decimal("0.00"))
+    open_periods = db.scalars(
+        select(BillingPeriod).join(Resident, BillingPeriod.resident_id == Resident.id).where(
+            BillingPeriod.status == "OPEN", Resident.is_archived.is_(False)
+        )
+    ).all()
+    outstanding = sum((period_balance(db, item) for item in open_periods), Decimal("0.00"))
+    occupancy_rate: float | None = None
+    if include_occupancy:
+        rooms = db.scalars(select(Room).where(Room.is_active.is_(True))).all()
+        capacity = sum(room.capacity for room in rooms)
+        occupied = sum(room_out(db, room).resident_count for room in rooms)
+        occupancy_rate = round(occupied / capacity * 100, 1) if capacity else 0
+    return InvestorSummaryOut(
+        revenue=revenue, expenses=total_expenses, net_profit=revenue - total_expenses,
+        outstanding_debt=outstanding, occupancy_rate=occupancy_rate,
+        months=[InvestorMonthOut(
+            year=year, month=month, revenue=revenue_by_month.get((year, month), Decimal("0.00")),
+            expenses=expenses_by_month.get((year, month), Decimal("0.00")),
+            net_profit=revenue_by_month.get((year, month), Decimal("0.00")) - expenses_by_month.get((year, month), Decimal("0.00")),
+        ) for year, month in month_keys],
+    )
+
+
 @router.get("/notifications", response_model=list[NotificationOut])
-def list_notifications(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> list[NotificationOut]:
+def list_notifications(db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> list[NotificationOut]:
     stored = db.scalars(
         select(Notification).where(Notification.user_id == actor.id, Notification.read_at.is_(None))
         .order_by(Notification.created_at.desc()).limit(50)
     ).all()
+    if actor.role == "ADMIN":
+        return [item for stored_item in stored if (item := notification_staff_out(stored_item)) is not None]
     return [notification_out(item) for item in stored]
 
 
 @router.post("/notifications/read-all", status_code=204)
-def mark_notifications_read(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> Response:
+def mark_notifications_read(db: Session = Depends(get_db), actor: User = Depends(require_operations_staff)) -> Response:
     rows = db.scalars(select(Notification).where(Notification.user_id == actor.id, Notification.read_at.is_(None))).all()
     now = datetime.now(UTC)
     for row in rows:
@@ -887,7 +1058,7 @@ def mark_notifications_read(db: Session = Depends(get_db), actor: User = Depends
 
 
 @router.get("/settings", response_model=SystemSettingsOut)
-def get_settings(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> SystemSettingsOut:
+def get_settings(db: Session = Depends(get_db), _: User = Depends(require_operations_staff)) -> SystemSettingsOut:
     record = db.get(SystemSetting, "general")
     value = record.value if record else {"dorm_name": "RS Best Hostel", "default_period_days": 30, "currency": "UZS"}
     return SystemSettingsOut(**value, updated_at=record.updated_at if record else None, billing_change_allowed=settings.admins_can_adjust_billing)
@@ -983,11 +1154,16 @@ def export_report(
     file_format: Literal["csv", "xlsx", "pdf"],
     date_from: date | None = None, date_to: date | None = None,
     interval: Literal["day", "week", "month"] = "month",
-    db: Session = Depends(get_db), actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db), actor: User = Depends(require_operations_staff),
 ) -> Response:
     if date_from and date_to and date_to < date_from:
         raise HTTPException(status_code=422, detail="Yakuniy sana boshlang‘ich sanadan oldin bo‘lishi mumkin emas.")
-    headers, rows = get_report_rows(db, kind, date_from, date_to, interval)
+    if actor.role == "ADMIN":
+        if kind not in {"residents", "rooms"}:
+            raise HTTPException(status_code=403, detail="Bu moliyaviy hisobot uchun ruxsat yo'q.")
+        headers, rows = get_staff_report_rows(db, kind)
+    else:
+        headers, rows = get_report_rows(db, kind, date_from, date_to, interval)
     name = f"rs-best-hostel-{kind}-{today_local().isoformat()}"
     if file_format == "csv":
         text_stream = io.StringIO(newline="")

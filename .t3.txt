@@ -1,0 +1,30 @@
+﻿        submitted_again = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+        assert submitted_again.status_code == 200, submitted_again.text
+        assert submitted_again.json()["access_code"] == ""
+        assert application.tracking_code_hash
+    
+        asked_file = client.post(f"/api/admissions/applications/{application.id}/request-info", headers=admin, json={"reason": "Please upload a new photo.", "fields": ["photo"]})
+        assert asked_file.status_code == 200
+        stale_file_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+        assert stale_file_submit.status_code == 422
+        refreshed_photo = client.post(
+            "/api/public/application/files",
+            headers={"X-CSRF-Token": public_session["csrf_token"]},
+            data={"kind": "PHOTO", "document_type": ""},
+            files={"upload": ("new-photo.png", _png_bytes(), "image/png")},
+        )
+        assert refreshed_photo.status_code == 201
+        final_submit = client.post("/api/public/application/submit", headers={"X-CSRF-Token": public_session["csrf_token"]}, json={"consent": True})
+        assert final_submit.status_code == 200
+    
+        room = client.post("/api/rooms", headers=admin, json={"number": "101", "dormitory_id": dormitory["id"], "floor": 1, "capacity": 1, "price": "300000"})
+>       assert room.status_code == 201, room.text
+E       AssertionError: {"detail":"Bu moliyaviy maydonni faqat operator boshqara oladi."}
+E       assert 403 == 201
+E        +  where 403 = <Response [403 Forbidden]>.status_code
+
+tests\test_admissions.py:134: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_admissions.py::test_admission_approval_creates_resident_billing_and_updates_statistics
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 14 deselected in 2.04s
