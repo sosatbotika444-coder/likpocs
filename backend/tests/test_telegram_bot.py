@@ -70,6 +70,36 @@ def test_applicant_flow_signs_contract_and_gets_status_updates(client, database,
     texts = [row.text for row in database.scalars(select(TelegramOutbox)).all()]
     assert any("ko‘rib chiqilmoqda" in text for text in texts)
     assert database.scalar(select(TelegramAccount).where(TelegramAccount.chat_id == 555)).application_id == application.id
+    profile = apply_flow.applicant_profile(database, 555)
+    assert profile and profile["first_name"] == "Aziza" and profile["signature_name"] == "Aziza Karimova"
+    assert "object_key" not in profile
+
+
+def test_staff_can_manage_own_telegram_tasks_and_view_nonfinancial_residents(client, database, operator_token, admin_token, bot_token):
+    operator = database.scalar(select(User).where(User.role == "OPERATOR"))
+    admin = database.scalar(select(User).where(User.role == "ADMIN"))
+    assert operator and admin
+    operator_code, _ = create_link_code(database, operator)
+    admin_code, _ = create_link_code(database, admin)
+    database.commit()
+    assert staff.link_staff(database, 701, 7, "operator", "Operator", operator_code)
+    assert staff.link_staff(database, 702, 8, "admin", "Admin", admin_code)
+
+    created = staff.create_quick_task(database, admin, "Xonani tekshirish")
+    task_prefix = created.split("[")[1].split("]")[0]
+    assert "IN_PROGRESS" in staff.change_task_status(database, admin, task_prefix, "IN_PROGRESS")
+    assert "Xonani tekshirish" in staff.open_tasks(database, admin)
+    assert task_prefix in staff.open_tasks(database, admin)
+    assert "DONE" in staff.change_task_status(database, operator, task_prefix, "DONE")
+
+    headers = _headers(operator_token)
+    room = client.post("/api/rooms", headers=headers, json={"number": "808", "capacity": 2, "price": "900000"})
+    resident = client.post("/api/residents", headers=headers, json={"first_name": "Murod", "last_name": "Aliyev", "room_id": room.json()["id"]})
+    assert resident.status_code == 201
+    listing = staff.residents_overview(database, admin, "Murod")
+    assert "Murod Aliyev" in listing and "900000" not in listing and "so'm" not in listing
+    with pytest.raises(PermissionError):
+        staff.residents_overview(database, User(role="INVESTOR", is_active=True))
 
 
 def test_outbox_marks_sent_and_stops_retrying_blocked_chats(database, bot_token):

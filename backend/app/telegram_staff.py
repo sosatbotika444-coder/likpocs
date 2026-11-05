@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app import admissions_api as adm
 from app.audit import audit
 from app.models import (
-    Notification, Room, StaffTask, StudentApplication, TelegramAccount, User, utcnow,
+    Notification, Resident, Room, StaffTask, StudentApplication, TelegramAccount, User, utcnow,
 )
 from app.services import room_out, today_local
 from app.telegram import consume_link_code
@@ -65,7 +65,7 @@ def link_staff(db: Session, chat_id: int, tg_user_id: int | None, username: str,
 def allowed_commands(user: User) -> list[str]:
     if user.role == "INVESTOR":
         return ["/summary"]
-    commands = ["/applications", "/rooms", "/tasks", "/notifications", "/stats"]
+    commands = ["/applications", "/rooms", "/residents", "/tasks", "/tasknew", "/taskstart", "/taskdone", "/notifications", "/stats"]
     if user.role == "OPERATOR":
         commands.append("/summary")
     return commands
@@ -141,6 +141,30 @@ def rooms_overview(db: Session, user: User) -> str:
     return f"Bo‘sh o‘rinlar: {free}\n" + "\n".join(lines[:40])
 
 
+def residents_overview(db: Session, user: User, query: str = "", limit: int = 12) -> str:
+    """Operational resident lookup without money fields for either staff role."""
+    if user.role not in ("OPERATOR", "ADMIN"):
+        raise PermissionError("Bu bo'lim faqat xodimlar uchun.")
+    statement = select(Resident, Room.number).outerjoin(Room, Resident.room_id == Room.id).where(
+        Resident.is_archived.is_(False), Resident.departed_on.is_(None),
+    )
+    term = query.strip()
+    if term:
+        like = f"%{term}%"
+        statement = statement.where(
+            Resident.first_name.ilike(like) | Resident.last_name.ilike(like) |
+            Resident.phone.ilike(like) | Room.number.ilike(like)
+        )
+    rows = db.execute(statement.order_by(Resident.last_name, Resident.first_name).limit(limit)).all()
+    if not rows:
+        return "Yashovchilar topilmadi."
+    return "\n".join(
+        f"• {resident.first_name} {resident.last_name} · {number or 'xona belgilanmagan'}-xona"
+        + (f" · {resident.phone}" if resident.phone else "")
+        for resident, number in rows
+    )
+
+
 def open_tasks(db: Session, user: User, limit: int = 10) -> str:
     """The user's own open tasks (assigned to or created by them)."""
     if user.role not in ("OPERATOR", "ADMIN"):
@@ -155,9 +179,45 @@ def open_tasks(db: Session, user: User, limit: int = 10) -> str:
         return "Ochiq vazifalar yo‘q."
     today = today_local()
     return "\n".join(
-        f"• {task.title} · {task.priority}" + (f" · muddat {task.due_date:%d.%m.%Y}" + (" (o‘tgan)" if task.due_date < today else "") if task.due_date else "")
+        f"• [{str(task.id)[:8]}] {task.title} · {task.priority}" + (f" · muddat {task.due_date:%d.%m.%Y}" + (" (o‘tgan)" if task.due_date < today else "") if task.due_date else "")
         for task in rows
     )
+
+
+def create_quick_task(db: Session, user: User, title: str) -> str:
+    """Create a self-assigned task from Telegram with an audit event."""
+    if user.role not in ("OPERATOR", "ADMIN"):
+        raise PermissionError("Bu amal faqat xodimlar uchun.")
+    clean_title = title.strip()
+    if not clean_title or len(clean_title) > 160:
+        raise ValueError("Vazifa nomini 1-160 belgi qilib yozing.")
+    task = StaffTask(title=clean_title, created_by=user.id, assignee_id=user.id, status="TODO", priority="NORMAL")
+    db.add(task)
+    db.flush()
+    audit(db, user, "TASK_CREATED", "StaffTask", task.id, {"title": task.title, "priority": task.priority, "via": "TELEGRAM"})
+    db.commit()
+    return f"Vazifa yaratildi: [{str(task.id)[:8]}] {task.title}"
+
+
+def change_task_status(db: Session, user: User, task_prefix: str, status: str) -> str:
+    """Move a task only when the linked staff user is allowed to edit it."""
+    if user.role not in ("OPERATOR", "ADMIN"):
+        raise PermissionError("Bu amal faqat xodimlar uchun.")
+    prefix = task_prefix.strip().lower()
+    matches = [task for task in db.scalars(select(StaffTask)).all() if str(task.id).lower().startswith(prefix)]
+    if len(matches) != 1:
+        raise ValueError("Vazifa kodi topilmadi yoki bir nechta mos keldi. /tasks orqali kodni tekshiring.")
+    task = matches[0]
+    if user.role != "OPERATOR" and task.created_by != user.id and task.assignee_id != user.id:
+        raise PermissionError("Bu vazifani o'zgartirishga ruxsat yo'q.")
+    if task.status == status:
+        return "Vazifa holati allaqachon shu holatda."
+    old_status = task.status
+    task.status = status
+    task.completed_at = utcnow() if status == "DONE" else None
+    audit(db, user, "TASK_UPDATED", "StaffTask", task.id, {"title": task.title, "changes": {"status": {"old": old_status, "new": status}}, "via": "TELEGRAM"})
+    db.commit()
+    return f"Vazifa yangilandi: {task.title} · {status}"
 
 
 def unread_notifications(db: Session, user: User) -> str:

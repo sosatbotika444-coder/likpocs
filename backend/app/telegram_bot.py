@@ -165,7 +165,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Bekor qilindi. Davom ettirish: /continue")
 
 
-@router.message(Command("help"))
+@router.message(Command("legacy_help"))
 async def cmd_help(message: Message) -> None:
     staff_info, _ = await current_info(message.chat.id)
     if not staff_info:
@@ -188,6 +188,27 @@ async def cmd_unlink(message: Message) -> None:
             db.commit()
         return account is not None
     await message.answer("Telegram uzildi." if await db_call(work, message.chat.id) else "Ulangan hisob topilmadi.")
+
+
+@router.message(Command("help"))
+async def cmd_help_current(message: Message) -> None:
+    staff_info, _ = await current_info(message.chat.id)
+    if not staff_info:
+        await message.answer(
+            "/start - boshlash\n/profile - ariza profilingiz\n/edit - qoralama ma'lumotlarini qayta kiritish\n"
+            "/status - ariza holati\n/continue - arizani davom ettirish\n/contract - shartnoma matni\n/link KOD - xodim hisobini ulash"
+        )
+        return
+    if staff_info[0] == "INVESTOR":
+        await message.answer("/summary - joriy oy moliyaviy yakuni\n/unlink - Telegramni uzish")
+        return
+    extra = "\n/summary - moliyaviy yakun" if staff_info[0] == "OPERATOR" else ""
+    await message.answer(
+        "/applications - ochiq arizalar\n/stats - arizalar statistikasi\n/rooms - bo'sh o'rinlar\n"
+        "/residents [qidiruv] - yashovchilar\n/tasks - vazifalarim\n/tasknew MATN - o'zimga vazifa\n"
+        "/taskstart KOD - vazifani boshlash\n/taskdone KOD - vazifani tugatish\n/notifications - bildirishnomalar"
+        + extra + "\n/unlink - Telegramni uzish"
+    )
 
 
 
@@ -330,6 +351,35 @@ async def cmd_contract(message: Message) -> None:
 
 
 
+@router.message(Command("profile"))
+async def cmd_profile(message: Message) -> None:
+    profile = await db_call(apply_flow.applicant_profile, message.chat.id)
+    if not profile:
+        await message.answer("Ariza profilingiz topilmadi. Ariza uchun taklif havolasidan foydalaning.")
+        return
+    full_name = f"{profile['first_name']} {profile['last_name']}".strip() or "—"
+    signature = profile["signature_name"] or "hali imzolanmagan"
+    await message.answer(
+        f"Ariza: {profile['reference']} · {staff.STATUS_UZ.get(profile['status'], profile['status'])}\n"
+        f"F.I.Sh.: {full_name}\nTug'ilgan sana: {profile['birth_date'] or '—'}\n"
+        f"Telefon: {profile['phone'] or '—'}\nTa'lim muassasasi: {profile['institution'] or '—'}\n"
+        f"Ko'chib kirish: {profile['requested_move_in'] or '—'}\nShartnoma imzosi: {signature}"
+    )
+
+
+@router.message(Command("edit"))
+async def cmd_edit(message: Message, state: FSMContext) -> None:
+    info = await db_call(load_draft, message.chat.id)
+    if not info:
+        await message.answer("Tahrirlash uchun faol ariza topilmadi.")
+        return
+    if info[1] != "DRAFT":
+        await message.answer("Yuborilgan arizani botdan tahrirlab bo'lmaydi. Xodim bilan bog'laning.")
+        return
+    await message.answer("Ma'lumotlarni boshidan qayta kiriting. Bekor qilish: /cancel")
+    await ask_step(message, state, 0)
+
+
 def staff_command(fn_name: str):
     """Build a handler that runs ``telegram_staff.<fn_name>(db, user)`` for the linked staff user."""
     async def handler(message: Message) -> None:
@@ -351,6 +401,49 @@ router.message.register(staff_command("rooms_overview"), Command("rooms"))
 router.message.register(staff_command("open_tasks"), Command("tasks"))
 router.message.register(staff_command("unread_notifications"), Command("notifications"))
 router.message.register(staff_command("finance_summary"), Command("summary"))
+
+
+@router.message(Command("residents"))
+async def cmd_residents(message: Message, command: CommandObject) -> None:
+    def work(db):
+        user = staff.staff_user(db, message.chat.id)
+        if user is None:
+            return "Avval hisobni ulang: /link KOD"
+        try:
+            return staff.residents_overview(db, user, command.args or "")
+        except PermissionError as exc:
+            return str(exc)
+    for part in chunks(await db_call(work)):
+        await message.answer(part)
+
+
+async def run_task_command(message: Message, command: CommandObject, status: str | None = None) -> None:
+    def work(db):
+        user = staff.staff_user(db, message.chat.id)
+        if user is None:
+            return "Avval hisobni ulang: /link KOD"
+        try:
+            if status is None:
+                return staff.create_quick_task(db, user, command.args or "")
+            return staff.change_task_status(db, user, command.args or "", status)
+        except (PermissionError, ValueError) as exc:
+            return str(exc)
+    await message.answer(await db_call(work))
+
+
+@router.message(Command("tasknew"))
+async def cmd_task_new(message: Message, command: CommandObject) -> None:
+    await run_task_command(message, command)
+
+
+@router.message(Command("taskstart"))
+async def cmd_task_start(message: Message, command: CommandObject) -> None:
+    await run_task_command(message, command, "IN_PROGRESS")
+
+
+@router.message(Command("taskdone"))
+async def cmd_task_done(message: Message, command: CommandObject) -> None:
+    await run_task_command(message, command, "DONE")
 
 
 @router.message(Command("applications"))

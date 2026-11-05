@@ -148,3 +148,25 @@ def attach_file(db: Session, application: StudentApplication, kind: str, documen
     audit(db, None, "APPLICATION_FILE_UPLOADED", "ApplicationFile", row.id, {"kind": kind, "document_type": doc_type, "via": "TELEGRAM"})
     db.commit()
 
+
+def applicant_profile(db: Session, chat_id: int) -> dict[str, str] | None:
+    """Return only the applicant data belonging to this Telegram chat, never private uploads."""
+    account = db.scalar(select(TelegramAccount).where(
+        TelegramAccount.chat_id == chat_id, TelegramAccount.is_active.is_(True),
+        TelegramAccount.application_id.is_not(None),
+    ))
+    if not account or not account.application_id:
+        return None
+    application = db.get(StudentApplication, account.application_id)
+    if application is None:
+        return None
+    return {
+        "reference": application.reference, "status": application.status,
+        "first_name": application.first_name_latin or "", "last_name": application.last_name_latin or "",
+        "birth_date": application.birth_date.isoformat() if application.birth_date else "",
+        "phone": application.phone or "", "institution": application.institution or "",
+        "requested_move_in": application.requested_move_in.isoformat() if application.requested_move_in else "",
+        "signature_name": application.contract_signature_name or "",
+        "contract_signed": "yes" if application.contract_accepted_at else "no",
+    }
+
