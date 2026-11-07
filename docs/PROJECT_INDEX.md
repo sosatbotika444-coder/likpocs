@@ -101,12 +101,14 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 | POST /notifications/read-all | Персонал | Отметить прочитанными только уведомления текущего пользователя. |
 | GET /settings | Персонал | Прочитать настройки общежития. |
 | PUT /settings | Оператор | Изменить настройки с аудитом. |
+| GET /settings/operator-contract-signature | Оператор | Прочитать только свою сохранённую Ф.И.О.-подпись для договоров. |
+| PUT /settings/operator-contract-signature | Оператор | Сохранить Ф.И.О.-подпись; действие аудируется, ADMIN и INVESTOR получают 403. |
 | GET /audit | Оператор | Постраничный журнал действий. |
 | GET /reports/{kind}.{file_format} | Персонал | CSV/XLSX/PDF отчёты по доступным видам и диапазону дат. |
 
 Точное поведение валидации, пагинации, транзакций и статус-кодов смотрите в handler-функциях api.py и схемах. Для новой операции обязательно проверяйте роль на сервере.
 
-Имена обработчиков из таблицы, сгруппированные по ресурсу: health; login, refresh, me; list_users, create_user, update_user; list_rooms, create_room, update_room, archive_room; list_residents, create_resident, get_resident, update_resident, archive_resident, checkout_resident, restore_resident, extend_resident, resident_payments; list_payments, create_payment, adjust_payment, list_adjustments; list_expenses, create_expense, void_expense; dashboard; list_notifications, mark_notifications_read; get_settings, update_settings; list_audit; export_report. Все эти функции находятся в backend/app/api.py.
+Имена обработчиков из таблицы, сгруппированные по ресурсу: health; login, refresh, me; list_users, create_user, update_user; list_rooms, create_room, update_room, archive_room; list_residents, create_resident, get_resident, update_resident, archive_resident, checkout_resident, restore_resident, extend_resident, resident_payments; list_payments, create_payment, adjust_payment, list_adjustments; list_expenses, create_expense, void_expense; dashboard; list_notifications, mark_notifications_read; get_settings, update_settings, get_operator_contract_signature, update_operator_contract_signature; list_audit; export_report. Все эти функции находятся в backend/app/api.py.
 
 ### Доска задач персонала — backend/app/tasks_api.py
 
@@ -148,6 +150,8 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 | POST /admissions/applications/{application_id}/start-review | Персонал | Начать проверку. |
 | POST /admissions/applications/{application_id}/reject | Персонал | Отклонить заявку с причиной. |
 | POST /admissions/applications/{application_id}/approve | Персонал | Одобрить, назначить комнату и создать/связать жителя и счёт; также восстановить отсутствующую связь у уже одобренной заявки с аудитом `APPLICATION_RESIDENT_LINKED`. |
+| GET /admissions/applications/{application_id}/contract | ADMIN либо назначенный этой заявке OPERATOR | Показать подписанный договор, сохранённый снимок текста, подписи и проверку хэша; финансовые значения не включаются. |
+| GET /admissions/applications/{application_id}/contract.pdf | ADMIN либо назначенный этой заявке OPERATOR | Скачать серверный PDF договора; выдача записывает `APPLICATION_CONTRACT_DOWNLOADED`. |
 | POST /admissions/applications/{application_id}/tracking-code | Персонал | Повторно выпустить код доступа после ручной проверки личности. |
 | GET /admissions/summary | Персонал | Сводка приёма, начислений и оплат связанных жителей. |
 | GET /admissions/settings | Authenticated staff | Reports storage, retention, upload availability, local Tesseract readiness, optional external AI readiness, and a safe configuration issue. |
@@ -167,7 +171,7 @@ Staff create campaigns and invitations. Applicants open /apply, save a draft, up
 
 Префиксы задаются в admissions_api.py и подключаются main.py. Не считайте публичную сессию аккаунтом персонала.
 
-Имена обработчиков из таблицы: list_dormitories, create_dormitory, update_dormitory; list_campaigns, create_campaign, change_campaign_status; list_invitations, create_invitation, pause_invitation, resume_invitation, revoke_invitation; list_applications, get_application, assign_application, update_application_notes, find_application_duplicates, request_application_info, start_application_review, reject_application, approve_application (обычное одобрение и восстановление отсутствующей связи профиля), reissue_tracking_code, admission_summary, admission_settings, download_application_file, signed_application_file_url, delete_application_file; exchange_invitation, exchange_access_code, get_public_application, update_public_application, list_public_application_files, upload_public_file, retry_public_file_extraction, submit_public_application, public_application_status, respond_to_request. Все эти функции находятся в backend/app/admissions_api.py.
+Имена обработчиков из таблицы: list_dormitories, create_dormitory, update_dormitory; list_campaigns, create_campaign, change_campaign_status; list_invitations, create_invitation, pause_invitation, resume_invitation, revoke_invitation; list_applications, get_application, assign_application, update_application_notes, find_application_duplicates, request_application_info, start_application_review, reject_application, approve_application (обычное одобрение и восстановление отсутствующей связи профиля), reissue_tracking_code, admission_summary, admission_settings, download_application_file, signed_application_file_url, delete_application_file, staff_application_contract, download_staff_application_contract; exchange_invitation, exchange_access_code, get_public_application, update_public_application, list_public_application_files, upload_public_file, retry_public_file_extraction, submit_public_application, public_application_contract, public_application_status, respond_to_request. Все эти функции находятся в backend/app/admissions_api.py.
 
 ## Структура backend и символы
 
@@ -313,11 +317,11 @@ Financial write retry safety (2026-10-30): `create_payment` and `create_expense`
 Ниже перечислены сопровождаемые исходные файлы, а не генерируемые каталоги node_modules, dist, .venv и кэши:
 
 - Корень: AGENTS.md, README.md, amain.txt, docker-compose.yml, netlify.toml, main.py, .env.example, .gitignore.
-- Backend app: backend/app/__init__.py, admissions_api.py, ai_extraction.py, api.py, audit.py, billing.py, bootstrap.py, config.py, contract.py, db.py, dependencies.py, file_storage.py, main.py, models.py, purge_expired_files.py, residency.py, scheduled_jobs.py, schemas.py, security.py, seed.py, services.py, tasks_api.py, telegram.py, telegram_apply.py, telegram_staff.py, telegram_bot.py.
-- Alembic: backend/alembic.ini, backend/alembic/env.py, backend/alembic/script.py.mako и восемь ревизий, перечисленных в разделе миграций.
+- Backend app: backend/app/__init__.py, admissions_api.py, ai_extraction.py, api.py, audit.py, billing.py, bootstrap.py, config.py, contract.py, contract_pdf.py, db.py, dependencies.py, file_storage.py, main.py, models.py, purge_expired_files.py, residency.py, scheduled_jobs.py, schemas.py, security.py, seed.py, services.py, tasks_api.py, telegram.py, telegram_apply.py, telegram_staff.py, telegram_bot.py.
+- Alembic: backend/alembic.ini, backend/alembic/env.py, backend/alembic/script.py.mako и одиннадцать ревизий, перечисленных в разделе миграций.
 - Backend tests: backend/tests/__init__.py, conftest.py, test_contract_telegram.py, test_telegram_bot.py, test_admissions.py, test_billing.py, test_expenses.py, test_idempotency.py, test_migrations.py, test_notifications.py, test_permissions.py, test_reports.py, test_tasks.py.
 - Frontend root: frontend/Dockerfile, .dockerignore, .nvmrc, index.html, nginx.conf, package.json, package-lock.json, tsconfig.json, tsconfig.node.json, vite.config.ts.
-- Frontend scripts/source: frontend/scripts/write-netlify-redirects.mjs; frontend/src/App.tsx, CommandPalette.tsx, api.ts, app-overrides.css, auth.tsx, landing.css, main.tsx, motion.css, sound.ts, styles.css, types.ts, locales/uz.ts; страницы AdminGuide.tsx, Admissions.tsx, Dashboard.tsx, Expenses.tsx, Landing.tsx, Payments.tsx, Reports.tsx, Residents.tsx, Rooms.tsx, Settings.tsx, Tasks.tsx, shared.tsx.
+- Frontend scripts/source: frontend/scripts/write-netlify-redirects.mjs; frontend/src/App.tsx, CommandPalette.tsx, api.ts, app-overrides.css, auth.tsx, landing.css, main.tsx, motion.css, sound.ts, styles.css, types.ts, locales/uz.ts; страницы AdminGuide.tsx, Admissions.tsx, ContractView.tsx, SignedContractDocument.tsx, Dashboard.tsx, Expenses.tsx, Landing.tsx, Payments.tsx, Reports.tsx, Residents.tsx, Rooms.tsx, Settings.tsx, Tasks.tsx, shared.tsx.
 - Deploy/docs/editor: scripts/deploy-netlify.ps1, scripts/deploy-railway.ps1, .railway/package.json, package-lock.json, railway.ts, docs/PROJECT_INDEX.md, docs/PROJECT_PROMPTS.md, .vscode/settings.json.
 - Корневой .env и dormflow-local.sqlite3 игнорируются и намеренно не индексируются; не добавляйте их содержимое сюда.
 
@@ -334,13 +338,25 @@ Financial write retry safety (2026-10-30): `create_payment` and `create_expense`
 | Метод и путь | Доступ | Назначение |
 | --- | --- | --- |
 | GET /api/public/application/contract | Сессия заявителя | Текст договора для чтения перед подписью. |
-| GET /api/admissions/applications/{id}/contract | Персонал (OPERATOR/ADMIN) | Договор с данными подписи и признаком совпадения хэша. |
+| GET /api/admissions/applications/{id}/contract | ADMIN либо назначенный OPERATOR | Подписанный договор со снимком текста, подписями и признаком совпадения хэша. |
 | POST /api/public/application/submit | Сессия + CSRF | Теперь принимает `contract_accepted`, `signature_name`. |
 | GET /api/telegram/status | Любой активный пользователь (только свой чат) | Состояние привязки. |
 | POST /api/telegram/link-code | Любой активный пользователь | Одноразовый 8-символьный код (в БД только хэш, срок `TELEGRAM_LINK_MINUTES`). |
 | DELETE /api/telegram/link | Любой активный пользователь | Отключить свой чат (запись деактивируется, не удаляется). |
 
 UI: `ContractView.tsx` (прокрутка до конца разблокирует галочку и поле подписи в шаге 3 формы `/apply`), модальное окно подписи в карточке заявки (`Admissions.tsx`), вкладка Telegram в `Settings.tsx`, подписи в `uz.ts` (`contract`, `telegram`, `investor.period`).
+
+## Подписанный договор и подпись оператора (2026-11-07)
+
+`SystemSetting` с ключом `operator_contract_signature` хранит только нормализованное Ф.И.О. оператора. Его читает и меняет исключительно OPERATOR через отдельные авторизованные обработчики `get_operator_contract_signature` и `update_operator_contract_signature`; изменения получают audit `OPERATOR_CONTRACT_SIGNATURE_UPDATED` без внесения Ф.И.О. в audit details. В `Settings.tsx` это отдельная форма «Operator imzosi», которой нет у ADMIN/INVESTOR.
+
+Миграция `20261107_01_contract_document_snapshots` добавляет в `student_applications` JSON `contract_snapshot`, `contract_operator_signature_name` и `contract_operator_signed_at`; upgrade/downgrade используют `batch_alter_table` и проверяются на SQLite. При первой подписи жильца `submit_application` сохраняет снимок отрендеренного существующего текста из `contract.py` вместе с уже существующими версией, SHA-256, датой, каналом и текстовой подписью. При первом одобрении сохраняется снимок настроенной операторской подписи и дата; последующее изменение настройки не меняет уже выданный договор. Старые договоры без снимка воспроизводятся по ранее сохранённым version/hash и доступному шаблону; новые документы сохраняют полный снимок. Секреты, содержимое удостоверений и финансовые суммы не добавляются в документ или аудит.
+
+`backend/app/contract_pdf.py` формирует выбираемый текстовый PDF ReportLab из отдельного серверного шаблона (не снимок браузерной страницы): полный сохранённый договор, сведения о подписи/канале/версии/хэше, операторская подпись, места для обеих подписей и место для печати. Это формирование PDF, а не заявление о квалифицированной электронной или криптографической подписи. `download_staff_application_contract` записывает `APPLICATION_CONTRACT_DOWNLOADED`; PDF получает ADMIN или только OPERATOR, назначенный заявке. Публичная сессия заявителя остаётся ограниченной своей заявкой и не может вызвать staff/PDF endpoint.
+
+`SignedContractDocument.tsx` и print CSS показывают договор в карточке одобренной заявки: «Chop etish» использует браузерную печать с отключёнными навигацией и кнопками; «Yuklab olish PDF» скачивает серверный файл `shartnoma-<application-id>-<resident-name>.pdf`. Кнопка загрузки доступна OPERATOR и ADMIN, а сервер повторно проверяет доступ. `ContractView.tsx` продолжает использовать тот же текст договора; заявочный workflow не заменён.
+
+Проверки: `test_contract_telegram.py` покрывает настройку подписи (включая запрет ADMIN/INVESTOR и audit), успешную загрузку PDF назначенным оператором, Content-Type/Content-Disposition, audit, неизменность снимка после смены настройки, запрет постороннему оператору и заявителю, а также разрешение ADMIN. `test_migrations.py` проверяет новую схему и downgrade на SQLite. Запуск от 2026-11-07: `backend/.venv/Scripts/python.exe -m pytest backend/tests/test_contract_telegram.py backend/tests/test_migrations.py -q` — 6 passed; frontend TypeScript и Vite production build passed (существующее предупреждение Vite о большом chunk).
 
 **Telegram (aiogram 3, long polling).** Миграция `20261104_01`: колонки договора и таблицы `telegram_accounts` (чат ↔ пользователь **или** заявка, CHECK единственной идентичности), `telegram_link_codes`, `telegram_outbox`. `telegram.py`: `telegram_configured`, `telegram_invitation_link`, `enqueue`, `queue_for_user`, `mirror_notification` (каждое персональное `notify()` дублируется в очередь; финансовые виды только для OPERATOR, INVESTOR получает только запрошенную сводку), `notify_application_status`, `notify_staff_of_application`, `create_link_code`, `consume_link_code`. `telegram_apply.py` (поток заявителя: `start_application`, `save_answer`, `missing_files`, `attach_file`), `telegram_staff.py` (`link_staff`, `queue_summary`, `open_applications`, `decide_application`, `rooms_overview`, `open_tasks`, `unread_notifications`, `finance_summary`) и `telegram_bot.py` (aiogram-обработчики, `deliver_outbox`, `outbox_loop`, `run`). Посетитель: приглашение `t.me/<бот>?start=inv_<токен>` → анкета → файлы → чтение и подтверждение договора → подпись → отправка; `/status`, `/continue`, `/contract`. Сотрудник: `/link КОД`, `/applications` (начать проверку/отклонить; одобрение с комнатой и тарифом остаётся на сайте), `/stats`, `/rooms` (без цен), `/tasks`, `/notifications`, `/summary` (OPERATOR). ADMIN не видит денег; INVESTOR — только `/summary`. Настройки: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_POLL_SECONDS`, `TELEGRAM_LINK_MINUTES`. Запуск: `python -m app.telegram_bot` (отдельный Railway-сервис `dormflow-telegram-bot` в `.railway/railway.ts`). OCR/AI в боте не используется; платёжные и иные провайдеры не подключены.
 

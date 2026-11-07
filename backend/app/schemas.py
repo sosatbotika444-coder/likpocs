@@ -507,6 +507,15 @@ class SystemSettingsOut(SystemSettingsIn):
     billing_change_allowed: bool = False
 
 
+class OperatorContractSignatureIn(BaseModel):
+    full_name: str = Field(min_length=2, max_length=200)
+
+
+class OperatorContractSignatureOut(BaseModel):
+    full_name: str = ""
+    updated_at: datetime | None = None
+
+
 class AuditEventOut(ORMModel):
     id: UUID
     actor_id: UUID | None
@@ -712,6 +721,8 @@ class ApplicationOut(PublicApplicationOut):
     contract_version: str = ""
     contract_signature_name: str = ""
     contract_signed_via: str = ""
+    contract_operator_signature_name: str = ""
+    contract_operator_signed_at: datetime | None = None
     files: list[ApplicationFileStaffOut] = Field(default_factory=list)
     events: list[ApplicationStatusEventOut] = Field(default_factory=list)
     created_at: datetime

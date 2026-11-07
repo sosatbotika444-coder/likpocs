@@ -94,6 +94,8 @@ from app.schemas import (
     RoomOut,
     RoomStaffOut,
     RoomUpdate,
+    OperatorContractSignatureIn,
+    OperatorContractSignatureOut,
     SystemSettingsIn,
     SystemSettingsOut,
     TelegramLinkCodeOut,
@@ -1092,6 +1094,34 @@ def update_settings(payload: SystemSettingsIn, db: Session = Depends(get_db), ac
     db.commit()
     db.refresh(record)
     return SystemSettingsOut(**record.value, updated_at=record.updated_at, billing_change_allowed=settings.admins_can_adjust_billing)
+
+
+@router.get("/settings/operator-contract-signature", response_model=OperatorContractSignatureOut)
+def get_operator_contract_signature(db: Session = Depends(get_db), _: User = Depends(require_operator)) -> OperatorContractSignatureOut:
+    """The typed operator signature is private to the operator settings flow."""
+    record = db.get(SystemSetting, "operator_contract_signature")
+    value = record.value if record and isinstance(record.value, dict) else {}
+    return OperatorContractSignatureOut(full_name=str(value.get("full_name", "")), updated_at=record.updated_at if record else None)
+
+
+@router.put("/settings/operator-contract-signature", response_model=OperatorContractSignatureOut)
+def update_operator_contract_signature(
+    payload: OperatorContractSignatureIn, db: Session = Depends(get_db), actor: User = Depends(require_operator),
+) -> OperatorContractSignatureOut:
+    full_name = " ".join(payload.full_name.split())
+    if len(full_name) < 2:
+        raise HTTPException(status_code=422, detail="Operatorning to‘liq F.I.Sh. ini kiriting.")
+    record = db.get(SystemSetting, "operator_contract_signature")
+    if not record:
+        record = SystemSetting(key="operator_contract_signature", value={"full_name": full_name}, updated_by=actor.id)
+        db.add(record)
+    else:
+        record.value = {"full_name": full_name}
+        record.updated_by = actor.id
+    audit(db, actor, "OPERATOR_CONTRACT_SIGNATURE_UPDATED", "SystemSetting")
+    db.commit()
+    db.refresh(record)
+    return OperatorContractSignatureOut(full_name=full_name, updated_at=record.updated_at)
 
 
 @router.get("/audit", response_model=PageInfo)

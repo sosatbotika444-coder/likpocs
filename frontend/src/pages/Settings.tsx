@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, Form, Input, Modal, Popconfirm, Select, Table, Tabs, Tag, notification } from 'antd';
 import { api, errorMessage } from '../api';
-import type { AuditEvent, Page, SystemSettings, TelegramLinkCode, TelegramStatus, User } from '../types';
+import type { AuditEvent, OperatorContractSignature, Page, SystemSettings, TelegramLinkCode, TelegramStatus, User } from '../types';
 import { auditActionLabel, auditDetailLabel, auditEntityLabel, formatDate, uz } from '../locales/uz';
 import { useAuth } from '../auth';
 import { PageHeading, Panel } from './shared';
 
 type TabKey = 'general' | 'users' | 'audit' | 'telegram';
 type GeneralForm = { dorm_name: string; default_period_days: number; currency: 'UZS' };
+type OperatorSignatureForm = { full_name: string };
 type UserForm = { email?: string; full_name: string; password?: string; role?: 'ADMIN' | 'INVESTOR' };
 
 function TelegramPanel() {
@@ -53,6 +54,7 @@ export default function SettingsPage({ initialTab = 'general' }: { initialTab?: 
   const [userModal, setUserModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [form] = Form.useForm<GeneralForm>();
+  const [operatorSignatureForm] = Form.useForm<OperatorSignatureForm>();
   const [userForm] = Form.useForm<UserForm>();
 
   const loadGeneral = async () => {
@@ -60,6 +62,10 @@ export default function SettingsPage({ initialTab = 'general' }: { initialTab?: 
     try { const r = await api.get<SystemSettings>('/settings'); form.setFieldsValue(r.data); }
     catch (e) { setError(errorMessage(e)); }
     finally { setLoading(false); }
+  };
+  const loadOperatorSignature = async () => {
+    try { const r = await api.get<OperatorContractSignature>('/settings/operator-contract-signature'); operatorSignatureForm.setFieldsValue(r.data); }
+    catch (e) { setError(errorMessage(e)); }
   };
   const loadUsers = async () => {
     setLoading(true); setError('');
@@ -75,6 +81,7 @@ export default function SettingsPage({ initialTab = 'general' }: { initialTab?: 
   };
   useEffect(() => {
     if (tab === 'general' && user?.role !== 'INVESTOR') void loadGeneral();
+    if (tab === 'general' && user?.role === 'OPERATOR') void loadOperatorSignature();
     if (tab === 'users' && user?.role === 'OPERATOR') void loadUsers();
     if (tab === 'audit' && user?.role === 'OPERATOR') void loadAudit();
   }, [tab, user?.role]);
@@ -86,6 +93,10 @@ export default function SettingsPage({ initialTab = 'general' }: { initialTab?: 
   const saveGeneral = async (values: GeneralForm) => {
     try { await api.put<SystemSettings>('/settings', values); notice.success({ message: 'Sozlamalar saqlandi.' }); }
     catch (e) { notice.error({ message: 'Sozlamalarni saqlab bo‘lmadi', description: errorMessage(e) }); }
+  };
+  const saveOperatorSignature = async (values: OperatorSignatureForm) => {
+    try { await api.put<OperatorContractSignature>('/settings/operator-contract-signature', values); notice.success({ message: uz.operatorSignature.saved }); }
+    catch (e) { notice.error({ message: errorMessage(e) }); }
   };
   const openUser = (target?: User) => {
     setEditingUser(target || null);
@@ -130,7 +141,7 @@ export default function SettingsPage({ initialTab = 'general' }: { initialTab?: 
     { title: 'Batafsil', dataIndex: 'details', render: (v: Record<string, unknown>) => Object.entries(v || {}).map(([k, val]) => `${auditDetailLabel(k)}: ${auditValue(k, val)}`).join(' · ') || '—' },
   ];
 
-  const generalTab = { key: 'general', label: 'Umumiy', children: <Panel title="Yotoqxona ma’lumotlari"><Form form={form} layout="vertical" onFinish={saveGeneral} className="settings-form"><Form.Item name="dorm_name" label="Yotoqxona nomi" rules={[{ required: true, message: 'Nomini kiriting.' }]}><Input maxLength={160}/></Form.Item><Form.Item name="default_period_days" label="Standart to‘lov davri (kun)" rules={[{ required: true, message: 'Kun sonini kiriting.' }]}><Input type="number" min={1} max={365000}/></Form.Item><Form.Item name="currency" label="Valyuta"><Input disabled/></Form.Item><div className="settings-actions"><Button type="primary" htmlType="submit" disabled={user?.role !== 'OPERATOR'}>O‘zgarishlarni saqlash</Button>{user?.role !== 'OPERATOR' && <span>Sozlamalarni faqat operator o‘zgartira oladi.</span>}</div></Form></Panel> };
+  const generalTab = { key: 'general', label: 'Umumiy', children: <div className="page-stack"><Panel title="Yotoqxona ma’lumotlari"><Form form={form} layout="vertical" onFinish={saveGeneral} className="settings-form"><Form.Item name="dorm_name" label="Yotoqxona nomi" rules={[{ required: true, message: 'Nomini kiriting.' }]}><Input maxLength={160}/></Form.Item><Form.Item name="default_period_days" label="Standart to‘lov davri (kun)" rules={[{ required: true, message: 'Kun sonini kiriting.' }]}><Input type="number" min={1} max={365000}/></Form.Item><Form.Item name="currency" label="Valyuta"><Input disabled/></Form.Item><div className="settings-actions"><Button type="primary" htmlType="submit" disabled={user?.role !== 'OPERATOR'}>O‘zgarishlarni saqlash</Button>{user?.role !== 'OPERATOR' && <span>Sozlamalarni faqat operator o‘zgartira oladi.</span>}</div></Form></Panel>{user?.role === 'OPERATOR' && <Panel title={uz.operatorSignature.title}><p className="muted">{uz.operatorSignature.subtitle}</p><Form form={operatorSignatureForm} layout="vertical" onFinish={saveOperatorSignature} className="settings-form"><Form.Item name="full_name" label={uz.operatorSignature.field} rules={[{ required: true, min: 2, message: 'To‘liq F.I.Sh. ni kiriting.' }]}><Input maxLength={200} autoComplete="name"/></Form.Item><Button type="primary" htmlType="submit">{uz.operatorSignature.save}</Button></Form></Panel>}</div> };
   const telegramTab = { key: 'telegram', label: 'Telegram', children: <TelegramPanel /> };
   const items = user?.role === 'OPERATOR' ? [
     generalTab, telegramTab,

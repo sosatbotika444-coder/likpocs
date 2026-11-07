@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
@@ -29,6 +30,7 @@ from app.ai_extraction import (
 from app.billing import create_initial_period
 from app.config import settings
 from app.contract import CONTRACT_VERSION, contract_hash, render_contract
+from app.contract_pdf import contract_pdf
 from app.db import get_db
 from app.dependencies import get_current_user, require_operations_staff, require_operator
 from app.file_storage import storage, validate_upload
@@ -772,6 +774,14 @@ def approve_application(application_id: UUID, payload: ApplicationApproveIn, db:
     application.approved_move_out = payload.move_out
     application.review_reason = payload.reason.strip()
     application.assigned_to = user.id
+    if application.contract_operator_signed_at is None:
+        operator_signature = _operator_signature_name(db)
+        if operator_signature:
+            application.contract_operator_signature_name = operator_signature
+            application.contract_operator_signed_at = utcnow()
+            audit(db, user, "APPLICATION_CONTRACT_OPERATOR_SIGNED", "StudentApplication", application.id, {
+                "contract_version": application.contract_version,
+            })
     if not repairing_approved_application or application.terminal_at is None:
         application.terminal_at = utcnow()
     retention = settings.file_retention_days
@@ -1309,6 +1319,28 @@ def contract_for_application(application: StudentApplication, *, on: date | None
     return render_contract(reference=application.reference, tenant_name=name, tenant_phone=application.phone, on=on or today_local())
 
 
+def _contract_document(application: StudentApplication, *, on: date | None = None) -> dict[str, object]:
+    """Use the immutable rendered wording when it was captured at signing."""
+    if isinstance(application.contract_snapshot, dict) and application.contract_snapshot.get("sections"):
+        return deepcopy(application.contract_snapshot)
+    return contract_for_application(application, on=on)
+
+
+def _require_contract_access(application: StudentApplication, user: User) -> None:
+    """Admins may inspect contracts; operators may inspect only their assigned applications."""
+    if user.role == "ADMIN":
+        return
+    if user.role == "OPERATOR" and application.assigned_to == user.id:
+        return
+    raise HTTPException(status_code=403, detail="Ushbu shartnomani ko‘rish uchun ruxsatingiz yo‘q.")
+
+
+def _operator_signature_name(db: Session) -> str:
+    record = db.get(SystemSetting, "operator_contract_signature")
+    values = record.value if record and isinstance(record.value, dict) else {}
+    return " ".join(str(values.get("full_name", "")).split())
+
+
 def _clean_signature(value: str) -> str:
     return " ".join(value.split())
 
@@ -1399,6 +1431,7 @@ def submit_application(
         application.contract_accepted_at = utcnow()
         application.contract_signature_name = signature
         application.contract_signed_via = via
+        application.contract_snapshot = contract_for_application(application)
         audit(db, None, "APPLICATION_CONTRACT_SIGNED", "StudentApplication", application.id, {"contract_version": CONTRACT_VERSION, "via": via})
     application.requested_fields = []
     application.review_reason = ""
@@ -1419,26 +1452,70 @@ def submit_application(
 def public_application_contract(request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
     """Lease agreement the applicant must read and accept before submitting (session-scoped)."""
     application, _ = _student_session(request, db)
-    return contract_for_application(application)
+    accepted_at = application.contract_accepted_at
+    on = _aware(accepted_at).astimezone(ZoneInfo(settings.timezone)).date() if accepted_at else None
+    return _contract_document(application, on=on)
 
 
 @staff_router.get("/admissions/applications/{application_id}/contract")
 def staff_application_contract(application_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict[str, object]:
-    """Staff view of the accepted agreement with signature metadata (no document contents)."""
-    _require_staff(user)
+    """Authorised staff view of the accepted agreement and immutable signature metadata."""
     application = db.get(StudentApplication, application_id)
     if not application:
         raise HTTPException(status_code=404, detail="Ariza topilmadi.")
+    _require_contract_access(application, user)
     accepted_at = application.contract_accepted_at
+    if not accepted_at:
+        raise HTTPException(status_code=409, detail="Shartnoma hali yashovchi tomonidan imzolanmagan.")
     on = _aware(accepted_at).astimezone(ZoneInfo(settings.timezone)).date() if accepted_at else None
-    rendered = contract_for_application(application, on=on)
+    rendered = _contract_document(application, on=on)
     rendered["signed"] = accepted_at is not None
     rendered["signed_version"] = application.contract_version
     rendered["signed_hash_matches"] = bool(application.contract_hash) and application.contract_hash == contract_hash()
     rendered["signature_name"] = application.contract_signature_name
     rendered["signed_at"] = accepted_at.isoformat() if accepted_at else None
     rendered["signed_via"] = application.contract_signed_via
+    rendered["operator_signature_name"] = application.contract_operator_signature_name
+    rendered["operator_signed_at"] = application.contract_operator_signed_at.isoformat() if application.contract_operator_signed_at else None
     return rendered
+
+
+def _contract_filename(application: StudentApplication) -> str:
+    name = "-".join(part for part in (
+        application.last_name_latin, application.first_name_latin, application.middle_name_latin,
+    ) if part.strip()) or "yashovchi"
+    safe_name = "".join(char if char.isalnum() or char in "-_" else "-" for char in name).strip("-") or "yashovchi"
+    return f"shartnoma-{application.id}-{safe_name}.pdf"
+
+
+@staff_router.get("/admissions/applications/{application_id}/contract.pdf")
+def download_staff_application_contract(application_id: UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> Response:
+    """Download the server-rendered agreement after role and assignment verification."""
+    application = db.get(StudentApplication, application_id)
+    if not application:
+        raise HTTPException(status_code=404, detail="Ariza topilmadi.")
+    _require_contract_access(application, user)
+    if not application.contract_accepted_at:
+        raise HTTPException(status_code=409, detail="Shartnoma hali yashovchi tomonidan imzolanmagan.")
+    contract = _contract_document(application, on=_aware(application.contract_accepted_at).astimezone(ZoneInfo(settings.timezone)).date())
+    content = contract_pdf(
+        contract=contract,
+        tenant_signature=application.contract_signature_name,
+        signed_at=application.contract_accepted_at,
+        signed_via=application.contract_signed_via,
+        signed_version=application.contract_version,
+        signed_hash=application.contract_hash,
+        hash_matches=bool(application.contract_hash) and application.contract_hash == contract_hash(),
+        operator_signature=application.contract_operator_signature_name,
+        operator_signed_at=application.contract_operator_signed_at,
+    )
+    audit(db, user, "APPLICATION_CONTRACT_DOWNLOADED", "StudentApplication", application.id, {"contract_version": application.contract_version})
+    db.commit()
+    from urllib.parse import quote
+    filename = _contract_filename(application)
+    fallback = f"shartnoma-{application.id}.pdf"
+    disposition = f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+    return Response(content, media_type="application/pdf", headers={"Content-Disposition": disposition})
 
 
 @public_router.get("/application/status", response_model=PublicStatusOut)

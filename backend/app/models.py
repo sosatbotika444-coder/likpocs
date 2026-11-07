@@ -317,6 +317,10 @@ class StudentApplication(Base):
     contract_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     contract_signature_name: Mapped[str] = mapped_column(String(200), default="")
     contract_signed_via: Mapped[str] = mapped_column(String(12), default="")
+    # Preserve the rendered agreement and the operator's typed signature for each issued document.
+    contract_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    contract_operator_signature_name: Mapped[str] = mapped_column(String(200), default="")
+    contract_operator_signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tracking_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     assigned_to: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     review_reason: Mapped[str] = mapped_column(Text, default="")

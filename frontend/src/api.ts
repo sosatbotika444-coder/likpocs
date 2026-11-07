@@ -39,6 +39,13 @@ export function clearSession() {
   localStorage.removeItem(REFRESH_KEY);
 }
 export function hasSession() { return Boolean(localStorage.getItem(ACCESS_KEY)); }
+export async function downloadPdf(path: string, filename: string) {
+  const response = await api.get(path, { responseType: 'blob' });
+  const url = URL.createObjectURL(response.data as Blob);
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = filename; anchor.click();
+  URL.revokeObjectURL(url);
+}
 export function errorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;

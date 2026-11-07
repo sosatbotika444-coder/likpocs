@@ -60,6 +60,7 @@ export type InvestorSummary = {
   months: { year: number; month: number; revenue: number; expenses: number; net_profit: number }[];
 };
 export type SystemSettings = { dorm_name: string; default_period_days: number; currency: 'UZS'; updated_at: string | null; billing_change_allowed: boolean };
+export type OperatorContractSignature = { full_name: string; updated_at: string | null };
 export type AuditEvent = { id: string; actor_id: string | null; actor_name: string; action: string; entity_type: string; entity_id: string | null; details: Record<string, unknown>; created_at: string };
 export type PaymentAdjustment = { id: string; payment_id: string; amount_delta: number; reason: string; adjusted_by: string; created_at: string };
 export type Dormitory = { id: string; name: string; address: string; is_default: boolean; is_active: boolean };
@@ -105,7 +106,7 @@ export type PublicCampaign = { name: string; custom_fields: CustomField[]; docum
 export type PublicApplication = ApplicationData & { reference: string; status: string; requested_fields: string[]; review_reason: string; consent_version: string; contract_accepted_at?: string | null };
 export type ContractSection = { title: string; clauses: string[] };
 export type Contract = { version: string; hash: string; title: string; number: string; date: string; city: string; sections: ContractSection[] };
-export type StaffContract = Contract & { signed: boolean; signed_version: string; signed_hash_matches: boolean; signature_name: string; signed_at: string | null; signed_via: string };
+export type StaffContract = Contract & { signed: boolean; signed_version: string; signed_hash_matches: boolean; signature_name: string; signed_at: string | null; signed_via: string; operator_signature_name: string; operator_signed_at: string | null };
 export type TelegramStatus = { configured: boolean; bot_username: string; linked: boolean; username: string };
 export type TelegramLinkCode = { code: string; expires_at: string; bot_username: string; link: string | null };
 export type AdmissionSettings = { storage_backend: string; storage_configured: boolean; retention_days: number | null; default_period_days: number; billing_change_allowed: boolean; uploads_enabled: boolean; ai_configured: boolean; ai_configuration_issue: string | null; local_ocr_configured: boolean; external_ai_configured: boolean; antivirus_configured: boolean };
